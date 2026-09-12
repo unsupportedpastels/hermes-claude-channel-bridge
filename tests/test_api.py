@@ -92,6 +92,35 @@ def test_auth_catalog_and_ordinary_completion(tmp_path):
     assert engines[0].closed.is_set()
 
 
+def test_title_response_format_is_validated_then_stripped_for_native(tmp_path):
+    app, engines = app_factory(tmp_path)
+    body = dict(
+        BODY,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "title",
+                "schema": {
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}},
+                    "required": ["title"],
+                },
+            },
+        },
+    )
+    with TestClient(app) as client:
+        result = client.post("/v1/chat/completions", headers=HEADERS, json=body)
+        assert result.status_code == 200
+        assert "response_format" not in engines[0].calls[0]
+        for invalid in ("json", {}, {"type": "xml"}):
+            rejected = client.post(
+                "/v1/chat/completions",
+                headers=dict(HEADERS, **{"X-Hermes-Bridge-Client": "invalid"}),
+                json=dict(BODY, response_format=invalid),
+            )
+            assert rejected.status_code == 400
+
+
 def test_explicit_owner_close_releases_native_and_is_idempotent(tmp_path):
     app, engines = app_factory(tmp_path)
     with TestClient(app) as client:

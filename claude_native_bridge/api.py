@@ -38,6 +38,7 @@ _ALLOWED = frozenset(
         "tool_choice",
         "stream",
         "stream_options",
+        "response_format",
         "hermes_session_id",
         "reasoning_effort",
         "temperature",
@@ -79,6 +80,14 @@ def _validate(body):
     for name in ("stream", "parallel_tool_calls"):
         if name in body and type(body[name]) is not bool:
             raise ValueError("Expected boolean")
+    response_format = body.get("response_format")
+    if response_format is not None:
+        if (
+            not isinstance(response_format, dict)
+            or response_format.get("type") not in ("json_object", "json_schema")
+            or len(json.dumps(response_format, allow_nan=False).encode()) > 65_536
+        ):
+            raise ValueError("Unsupported response_format")
     for name in ("hermes_session_id", "user", "reasoning_effort"):
         if name in body and (not isinstance(body[name], str) or len(body[name]) > 512):
             raise ValueError("Expected bounded string")
@@ -452,7 +461,13 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
             kwargs = {
                 k: v
                 for k, v in body.items()
-                if k not in {"hermes_session_id", "stream_options", "stream"}
+                if k
+                not in {
+                    "hermes_session_id",
+                    "stream_options",
+                    "stream",
+                    "response_format",
+                }
             }
             kwargs.update(
                 stream=False,
