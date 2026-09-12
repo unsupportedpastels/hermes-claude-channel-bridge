@@ -245,10 +245,12 @@ class NativeBridgeClient:
                 expired = [
                     name
                     for name, value in self._bindings.items()
-                    if name != key and value.native is not None and value.native.closed
+                    if name != key
+                    and (value.native is None or value.native.closed)
                 ]
                 for name in expired:
-                    self._bindings.pop(name)
+                    expired_state = self._bindings.pop(name)
+                    expired_state.history.reset()
                 if (
                     len(self._bindings) >= settings.max_sessions
                     and key not in self._bindings
