@@ -85,6 +85,11 @@ Call read_result(handle="r7f3", offset=0, length=15000) to read it in pages.
 
 **Step 2: Implement.** On model/effort switch with history > threshold: keep the newest tail that fits, prepend `"[Earlier conversation omitted: N chars. Ask read_result handle 'boot' for older windows if needed.]"`, and register the omitted prefix as a paged handle reusing Task 1's store.
 
+**Step 2b: Cache-preserving frame rendering (borrowed from Hermes core).** Source-verified conventions from Hermes's own prompt-cache discipline (`agent/system_prompt.py:808–856`, AGENTS.md "per-conversation prompt caching is sacred"):
+- **Date-only timestamps.** Render any time in the bootstrap frame as date-only (+TZ offset), never minute-precision — minute-precision changes invalidate the prefix on every rebuild path, so a rebuilt native session mid-day would re-prefill the whole frame.
+- **Volatile content last.** Order the frame stable-first (omission notice, handle text) and volatile-last (current timestamp, memory snapshot tail), so on longest-prefix reuse a changed memory block only re-prefills from that block down, not the whole frame.
+- **Synthetic messages never persist.** The omission notice and handle envelopes are tool-result content only — a test must assert they never appear as a synthetic user turn in canonical history (mirrors `run_agent.py:241` transcript-poisoning rule).
+
 **Step 3: Tests green.** Unit tests for threshold math, tail selection, handle registration.
 
 ### Task 3: Stale-native-session rebuild

@@ -366,7 +366,13 @@ class NativeBridgeClient:
                         )
                         if source_frame["reset"]:
                             _clear_bootstrap_tail(state)
-                            paged_messages = paged_source
+                            paged_messages, _ = _bounded_bootstrap(
+                                paged_source,
+                                tools,
+                                choice,
+                                state.native,
+                                settings.bootstrap_max_chars,
+                            )
                         else:
                             delta = json.loads(source_frame["content"])["messages"]
                             paged_messages = copy.deepcopy(
@@ -399,14 +405,22 @@ class NativeBridgeClient:
                         )
                         if source_frame["reset"]:
                             _clear_bootstrap_tail(state)
-                            paged_messages = paged_source
+                            paged_messages, _ = _bounded_bootstrap(
+                                paged_source,
+                                tools,
+                                choice,
+                                native,
+                                settings.bootstrap_max_chars,
+                            )
                         else:
                             delta = json.loads(source_frame["content"])["messages"]
                             paged_messages = copy.deepcopy(
                                 state.compacted_messages or []
                             ) + delta
                             source_messages = paged_source
-                    elif switching:
+                    else:
+                        # Fresh sessions and divergence rebuilds both bootstrap
+                        # from a full source; bound whichever exceeds the limit.
                         paged_messages, compacted = _bounded_bootstrap(
                             paged_source,
                             tools,
@@ -418,8 +432,8 @@ class NativeBridgeClient:
                             state.source_history = HistoryTracker()
                             state.compacted_messages = copy.deepcopy(paged_messages)
                             source_messages = paged_source
-                    else:
-                        paged_messages = paged_source
+                        else:
+                            paged_messages = paged_source
                     frame = state.history.prepare(paged_messages, tools, choice)
                 assert frame is not None and paged_messages is not None
                 request_id = str(uuid.uuid4())

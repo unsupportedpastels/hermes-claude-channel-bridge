@@ -157,3 +157,35 @@ def test_bootstrap_max_chars_defaults_and_rejects_invalid_values():
     for value in (0, -1, True, 1.5, "100000"):
         with pytest.raises(NativeBridgeError, match="bootstrap_max_chars"):
             Settings.from_mapping({"bootstrap_max_chars": value})
+
+
+def test_divergence_rebuild_is_also_bounded(tmp_path):
+    """Source-history divergence (e.g. Hermes compression) re-bootstraps;
+    that path must respect bootstrap_max_chars too."""
+    BootstrapNative.instances = []
+    client = NativeBridgeClient(
+        hermes_home=tmp_path,
+        settings=Settings(
+            development_channels_accepted=True,
+            bootstrap_max_chars=1_000,
+        ),
+        native_factory=BootstrapNative,
+    )
+    try:
+        client.create(**request([{"role": "user", "content": "hi"}]))
+        big = [
+            {"role": "user", "content": f"turn-{i}:" + "x" * 300}
+            for i in range(8)
+        ]
+        client.create(**request(big, model="claude-opus-4-8"))
+        divergent = [{"role": "user", "content": "rewritten:" + "y" * 900}]
+        client.create(**request(divergent, model="claude-opus-4-8"))
+
+        raw = BootstrapNative.instances[-1].frames[0]
+        assert len(raw) <= 1_000
+        final = json.loads(raw)
+        assert any(
+            "omitted" in str(m.get("content", "")) for m in final["messages"]
+        )
+    finally:
+        client.close()
