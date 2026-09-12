@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
+import os
 import threading
 import uuid
 from dataclasses import dataclass
@@ -92,6 +95,57 @@ def assistant_dict(completion):
             for tc in m.tool_calls
         ]
     return result
+
+
+def _write_spool(runtime: Path, text: str) -> str:
+    encoded = text.encode("utf-8")
+    handle = "r" + hashlib.sha256(encoded).hexdigest()[:32]
+    spool = Path(runtime) / "spool"
+    spool.mkdir(mode=0o700, exist_ok=True)
+    if os.name != "nt":
+        os.chmod(spool, 0o700)
+    target = spool / (handle + ".txt")
+    if target.exists():
+        if target.read_bytes() != encoded:
+            raise NativeBridgeError("Paged result handle collision")
+        return handle
+    temporary = spool / ("." + handle + "." + uuid.uuid4().hex + ".tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as file:
+            file.write(encoded)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return handle
+
+
+def _page_tool_results(messages, native, threshold):
+    paged = copy.deepcopy(messages)
+    oversized = [
+        message
+        for message in paged
+        if isinstance(message, dict)
+        and message.get("role") == "tool"
+        and isinstance(message.get("content"), str)
+        and len(message["content"]) > threshold
+    ]
+    if not oversized:
+        return paged
+    runtime = getattr(native, "runtime", None)
+    if runtime is None:
+        raise NativeBridgeError("Native runtime unavailable for paged tool result")
+    for message in oversized:
+        text = message["content"]
+        handle = _write_spool(Path(runtime), text)
+        message["content"] = (
+            f"Result too large ({len(text):,} chars). Handle: {handle}.\n"
+            f'Call read_result(handle="{handle}", offset=0, length=15000) '
+            "to read it in pages."
+        )
+    return paged
 
 
 class NativeBridgeClient:
@@ -205,6 +259,8 @@ class NativeBridgeClient:
                 state = self._bindings.setdefault(key, Binding(HistoryTracker()))
                 self._active = True
             try:
+                # Validate canonical input before any native startup or spool write.
+                HistoryTracker().prepare(messages, tools, choice)
                 if state.native is not None and (
                     state.native.closed
                     or state.model != model
@@ -213,10 +269,18 @@ class NativeBridgeClient:
                     state.native.close()
                     state.native = None
                     state.history.reset()
-                frame = state.history.prepare(messages, tools, choice)
-                if frame["reset"] and state.native is not None:
-                    state.native.close()
-                    state.native = None
+
+                frame = None
+                paged_messages = None
+                if state.native is not None:
+                    paged_messages = _page_tool_results(
+                        messages, state.native, settings.page_threshold
+                    )
+                    frame = state.history.prepare(paged_messages, tools, choice)
+                    if frame["reset"]:
+                        state.native.close()
+                        state.native = None
+
                 if state.native is None:
                     native = self._native_factory(
                         settings, self._home, model, effort, http_client=self._client
@@ -227,6 +291,11 @@ class NativeBridgeClient:
                     state.model = model
                     state.effort = effort
                     native.start()
+                    paged_messages = _page_tool_results(
+                        messages, native, settings.page_threshold
+                    )
+                    frame = state.history.prepare(paged_messages, tools, choice)
+                assert frame is not None and paged_messages is not None
                 request_id = str(uuid.uuid4())
                 response = state.native.exchange(
                     frame["content"],
@@ -248,7 +317,7 @@ class NativeBridgeClient:
                     state.native, "last_response_source", "respond"
                 )
                 state.history.commit(
-                    messages, tools, choice, assistant_dict(completion)
+                    paged_messages, tools, choice, assistant_dict(completion)
                 )
                 return (
                     CompletedStream(completion) if kwargs.get("stream") else completion

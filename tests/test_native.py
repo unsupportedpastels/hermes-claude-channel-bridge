@@ -49,8 +49,10 @@ class NativeLaunchTests(unittest.TestCase):
         self.assertNotIn("--print", args)
         self.assertEqual(args[args.index("--model") + 1], "claude-fable-5-1")
         self.assertEqual(args[args.index("--tools") + 1], "")
+        allowed = args.index("--allowedTools")
         self.assertEqual(
-            args[args.index("--allowedTools") + 1], "mcp__hermesbridge__respond"
+            args[allowed + 1 : allowed + 3],
+            ["mcp__hermesbridge__respond", "mcp__hermesbridge__read_result"],
         )
         self.assertIn("--strict-mcp-config", args)
         self.assertNotIn("--dangerously-skip-permissions", args)

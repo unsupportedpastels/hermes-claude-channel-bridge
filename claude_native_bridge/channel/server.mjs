@@ -7,7 +7,35 @@ import {Bridge, BridgeError, MAX_BYTES, RESPOND_SCHEMA} from './protocol.mjs';
 import {createHttpServer} from './http.mjs';
 import {readTransport} from './platform.mjs';
 
-const instructions = 'Hermes owns canonical history and task execution. For each authoritative request, answer ordinary text directly and finish normally when no Hermes tool is needed. Do not call respond for an ordinary text final. To propose one to sixteen Hermes tool calls, call respond exactly once with kind tool_calls and the exact request_id. Never execute task tools natively. Any brief pre-tool prose is part of your answer. respond is a yield-and-wait rendezvous: its pending tool result is the NEXT authoritative request. Process that request, then answer directly or propose tools. Do not retry a pending respond call. Cancellation breaks this session.';
+const instructions = 'Hermes owns canonical history and task execution. For each authoritative request, answer ordinary text directly and finish normally when no Hermes tool is needed. Do not call respond for an ordinary text final. To propose one to sixteen Hermes tool calls, call respond exactly once with kind tool_calls and the exact request_id. Never execute task tools natively. Any brief pre-tool prose is part of your answer. respond is a yield-and-wait rendezvous: its pending tool result is the NEXT authoritative request. Process that request, then answer directly or propose tools. Do not retry a pending respond call. Use read_result only for paged Hermes tool-result handles. Cancellation breaks this session.';
+const READ_RESULT_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['handle', 'offset', 'length'],
+  properties: {
+    handle: {type: 'string'},
+    offset: {type: 'integer', minimum: 0},
+    length: {type: 'integer', minimum: 1, maximum: 15000},
+  },
+};
+const toolText = (text, isError = false) => ({content: [{type: 'text', text}], ...(isError ? {isError: true} : {})});
+async function readResult(dir, args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)
+      || !/^r[0-9a-f]{32}$/.test(args.handle ?? '')) {
+    return toolText('handle expired; re-run the tool', true);
+  }
+  if (!Number.isSafeInteger(args.offset) || args.offset < 0
+      || !Number.isSafeInteger(args.length) || args.length < 1 || args.length > 15000) {
+    return toolText('offset must be nonnegative and length must be from 1 to 15000', true);
+  }
+  try {
+    const file = path.join(dir, 'spool', `${args.handle}.txt`);
+    const stat = await fs.promises.lstat(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) return toolText('handle expired; re-run the tool', true);
+    const chars = Array.from(await fs.promises.readFile(file, 'utf8'));
+    return toolText(chars.slice(args.offset, args.offset + args.length).join(''));
+  } catch {
+    return toolText('handle expired; re-run the tool', true);
+  }
+}
 const log = (event, metadata = {}) => {
   if (process.env.HERMES_BRIDGE_DIAGNOSTICS === '1') process.stderr.write(JSON.stringify({time: new Date().toISOString(), event, ...metadata}) + '\n');
 };
@@ -55,11 +83,17 @@ try {
   mcp = new Server({name: 'hermesbridge', version: '0.1.0'}, {
     capabilities: {experimental: {'claude/channel': {}}, tools: {}}, instructions,
   });
-  mcp.setRequestHandler(ListToolsRequestSchema, async () => ({tools: [{
-    name: 'respond', description: 'Propose Hermes tool calls ONLY when task tools are needed, then wait for the next authoritative request. For a final answer use ordinary assistant text instead of this tool. Never execute proposed task tools.', inputSchema: RESPOND_SCHEMA,
-  }]}));
+  mcp.setRequestHandler(ListToolsRequestSchema, async () => ({tools: [
+    {
+      name: 'respond', description: 'Propose Hermes tool calls ONLY when task tools are needed, then wait for the next authoritative request. For a final answer use ordinary assistant text instead of this tool. Never execute proposed task tools.', inputSchema: RESPOND_SCHEMA,
+    },
+    {
+      name: 'read_result', description: 'Read a page from an oversized Hermes tool result using the handle from its compact result envelope.', inputSchema: READ_RESULT_SCHEMA,
+    },
+  ]}));
   mcp.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    if (request.params.name !== 'respond') throw new McpError(ErrorCode.InvalidParams, 'Only respond is supported');
+    if (request.params.name === 'read_result') return readResult(dir, request.params.arguments);
+    if (request.params.name !== 'respond') throw new McpError(ErrorCode.InvalidParams, 'Only respond and read_result are supported');
     try {
       const pending = bridge.respond(request.params.arguments, extra.signal);
       log('decision', {sequence: bridge.sequence, kind: request.params.arguments.kind});

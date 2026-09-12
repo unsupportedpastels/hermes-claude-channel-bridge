@@ -43,6 +43,7 @@ def native_argv(command, session_id, mcp_path, model, effort):
         "",
         "--allowedTools",
         "mcp__hermesbridge__respond",
+        "mcp__hermesbridge__read_result",
         "--permission-mode",
         "dontAsk",
         "--strict-mcp-config",
