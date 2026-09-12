@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68,<83"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-claude-native-bridge"
+version = "0.2.0"
+description = "Experimental native Claude Code Channels provider for Hermes"
+requires-python = ">=3.11"
+dependencies = [
+  "PyYAML>=6,<7", "jsonschema>=4,<5", "httpx>=0.27,<1",
+  "openai>=2,<3", "fastapi>=0.115,<1", "uvicorn>=0.30,<1",
+  "filelock>=3.15,<4", "python-dotenv>=1,<2", "psutil>=5.9,<8",
+  "pywinpty>=2.0.15,<3; sys_platform == 'win32'",
+  "pywin32>=308,<312; sys_platform == 'win32'",
+  "pyte>=0.8.2,<0.9; sys_platform == 'win32'",
+]
+
+[project.entry-points."hermes_agent.plugins"]
+claude-native-bridge = "claude_native_bridge.provider:register"
+
+# Live harnesses must set their temporary HERMES_HOME before importing Hermes.
+[tool.ruff.lint.per-file-ignores]
+"evals/*.py" = ["E402"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["claude_native_bridge*"]
+
+[tool.setuptools.package-data]
+claude_native_bridge = ["channel/server.mjs", "channel/protocol.mjs", "channel/http.mjs", "channel/platform.mjs", "channel/package.json", "channel/package-lock.json"]

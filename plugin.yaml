@@ -1,0 +1,5 @@
+name: claude-native-bridge
+kind: model-provider
+version: 0.2.0
+description: Plugin-only OpenAI-compatible API backed by native Claude Code.
+author: Mark
