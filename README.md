@@ -117,3 +117,22 @@ npm --prefix claude_native_bridge/channel test
 `evals/api_live.py` verifies actual API/SSE and an unmodified-Hermes tool round-trip. `evals/api_learning.py` verifies learning through the API. These consume native model usage and write only isolated test stores. Run them deliberately, not as ordinary unit tests. The earlier direct-client harnesses are historical development probes, not the current API setup path.
 
 No core monkeypatching, borrowed vendor tokens, print-mode fallback, commits, pushes or public release are part of this installation.
+
+## Running subagents on native Claude (delegation)
+
+Hermes subagents ride the bridge automatically when the delegate route points
+at it. In `~/.hermes/config.yaml` (the canonical config; the dashboard config
+mirrors it):
+
+```yaml
+delegation:
+  provider: claude-native-bridge
+  model: claude-sonnet-5
+```
+
+Each child gets its own native session (own session ID -> own
+`hermes_session_id` binding), warm across its turns and released when the
+child ends. Capacity: foreground sessions + `max_concurrent_children` must
+stay <= `claude_native_bridge.max_sessions` (6 covers 2 foreground + 3
+children with headroom). This is a deliberate per-use setting; the default
+delegation route stays on the cheaper provider.
