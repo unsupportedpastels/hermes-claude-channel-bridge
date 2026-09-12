@@ -4,7 +4,11 @@ from unittest.mock import patch
 
 import pytest
 
-from claude_native_bridge.client import NativeBridgeClient
+from claude_native_bridge.client import (
+    NativeBridgeClient,
+    _page_tool_results,
+    _with_session_identity,
+)
 from claude_native_bridge.native import NativeSession
 from claude_native_bridge.settings import NativeBridgeError, Settings
 
@@ -112,6 +116,57 @@ def test_oversized_tool_result_becomes_small_handle_envelope(tmp_path):
         assert (native.runtime / "spool" / f"{handle}.txt").read_text() == huge
     finally:
         client.close()
+
+
+def test_combined_tool_batch_pages_before_frame_overflow(tmp_path):
+    native = type("Native", (), {"runtime": tmp_path / "run"})()
+    native.runtime.mkdir()
+    contents = ["a" * 8_000, "b" * 7_000, "c" * 6_000, "small"]
+    messages = [
+        {"role": "tool", "tool_call_id": f"call-{index}", "content": content}
+        for index, content in enumerate(contents)
+    ]
+
+    paged = _page_tool_results(messages, native, 20_000)
+
+    assert [message["tool_call_id"] for message in paged] == [
+        f"call-{index}" for index in range(4)
+    ]
+    assert all("Call read_result" in message["content"] for message in paged)
+    spool = native.runtime / "spool"
+    assert len(list(spool.glob("r*.txt"))) == 4
+    assert {path.read_text() for path in spool.glob("r*.txt")} == set(contents)
+
+
+def test_separate_tool_batches_do_not_repage_old_inline_results(tmp_path):
+    native = type("Native", (), {"runtime": tmp_path / "run"})()
+    native.runtime.mkdir()
+    messages = [
+        {"role": "tool", "tool_call_id": "old", "content": "o" * 12_000},
+        {"role": "assistant", "content": "next"},
+        {"role": "tool", "tool_call_id": "new", "content": "n" * 12_000},
+    ]
+
+    paged = _page_tool_results(messages, native, 20_000)
+
+    assert paged == messages
+    assert not (native.runtime / "spool").exists()
+
+
+def test_native_frame_has_canonical_session_identity_not_runtime_name():
+    original = [{"role": "user", "content": "what session is this?"}]
+    result = _with_session_identity(original, "20260912_223512_a3b031")
+
+    assert original == [{"role": "user", "content": "what session is this?"}]
+    assert result[0] == {
+        "role": "system",
+        "content": (
+            "[Bridge metadata] Canonical Hermes session ID: "
+            "20260912_223512_a3b031. Bridge runtime directory names are opaque "
+            "and are not Hermes session IDs."
+        ),
+    }
+    assert result[1:] == original
 
 
 def test_page_threshold_defaults_and_rejects_invalid_values():

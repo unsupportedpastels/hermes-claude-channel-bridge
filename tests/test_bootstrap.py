@@ -68,7 +68,8 @@ def test_model_switch_bootstrap_is_bounded_and_spools_omitted_prefix(tmp_path):
         frame = json.loads(frame_text)
         assert len(frame_text) <= maximum
         assert frame["operation"] == "bootstrap"
-        notice = frame["messages"][0]["content"]
+        assert "Canonical Hermes session ID: bootstrap" in frame["messages"][0]["content"]
+        notice = frame["messages"][1]["content"]
         match = re.fullmatch(
             r"\[Earlier conversation omitted: ([0-9]+) chars\. "
             r"Ask read_result handle '([^']+)' for older windows if needed\.\]",
@@ -108,7 +109,8 @@ def test_effort_switch_keeps_tail_of_one_oversized_message(tmp_path):
         frame_text = BootstrapNative.instances[1].frames[0]
         frame = json.loads(frame_text)
         assert len(frame_text) <= maximum
-        assert frame["messages"][0]["content"].startswith(
+        assert "Canonical Hermes session ID: bootstrap" in frame["messages"][0]["content"]
+        assert frame["messages"][1]["content"].startswith(
             "[Earlier conversation omitted:"
         )
         assert frame["messages"][-1]["content"].endswith("newest-marker")

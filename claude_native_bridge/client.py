@@ -125,22 +125,57 @@ def _write_spool(runtime: Path, text: str) -> str:
     return handle
 
 
+def _with_session_identity(messages, binding):
+    native_messages = copy.deepcopy(messages)
+    if binding:
+        native_messages.insert(
+            0,
+            {
+                "role": "system",
+                "content": (
+                    "[Bridge metadata] Canonical Hermes session ID: "
+                    f"{binding}. Bridge runtime directory names are opaque "
+                    "and are not Hermes session IDs."
+                ),
+            },
+        )
+    return native_messages
+
+
 def _page_tool_results(messages, native, threshold):
     paged = copy.deepcopy(messages)
-    oversized = [
-        message
-        for message in paged
-        if isinstance(message, dict)
-        and message.get("role") == "tool"
-        and isinstance(message.get("content"), str)
-        and len(message["content"]) > threshold
-    ]
+    oversized = set()
+    batch = []
+    batch_chars = 0
+
+    def finish_batch():
+        nonlocal batch, batch_chars
+        if batch_chars > threshold:
+            oversized.update(batch)
+        batch = []
+        batch_chars = 0
+
+    for index, message in enumerate(paged):
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "tool"
+            and isinstance(message.get("content"), str)
+        ):
+            batch.append(index)
+            batch_chars += len(message["content"])
+            if len(message["content"]) > threshold:
+                oversized.add(index)
+        else:
+            finish_batch()
+    finish_batch()
+
     if not oversized:
         return paged
     runtime = getattr(native, "runtime", None)
     if runtime is None:
         raise NativeBridgeError("Native runtime unavailable for paged tool result")
-    for message in oversized:
+    for index in sorted(oversized):
+        message = paged[index]
         text = message["content"]
         handle = _write_spool(Path(runtime), text)
         message["content"] = (
@@ -157,6 +192,20 @@ def _bounded_bootstrap(messages, tools, choice, native, maximum):
     if len(tracker.prepare(messages, tools, choice)["content"]) <= maximum:
         return copy.deepcopy(messages), False
 
+    identity = []
+    history = messages
+    if (
+        messages
+        and isinstance(messages[0], dict)
+        and messages[0].get("role") == "system"
+        and isinstance(messages[0].get("content"), str)
+        and messages[0]["content"].startswith(
+            "[Bridge metadata] Canonical Hermes session ID:"
+        )
+    ):
+        identity = [copy.deepcopy(messages[0])]
+        history = messages[1:]
+
     runtime = getattr(native, "runtime", None)
     if runtime is None:
         raise NativeBridgeError("Native runtime unavailable for bounded bootstrap")
@@ -171,6 +220,7 @@ def _bounded_bootstrap(messages, tools, choice, native, maximum):
             f"Ask read_result handle '{predicted}' for older windows if needed.]"
         )
         bounded = [
+            *identity,
             {"role": "system", "content": notice},
             *copy.deepcopy(tail),
         ]
@@ -180,16 +230,16 @@ def _bounded_bootstrap(messages, tools, choice, native, maximum):
         return len(tracker.prepare(bounded, tools, choice)["content"]) <= maximum
 
     selected = None
-    for start in range(1, len(messages) + 1):
-        current = candidate(messages[:start], messages[start:])
+    for start in range(1, len(history) + 1):
+        current = candidate(history[:start], history[start:])
         if fits(current[2]):
             selected = current
             break
 
     # A single newest text message can itself exceed the limit. Preserve as much
     # of its newest content as possible rather than reducing the tail to empty.
-    if selected is not None and not selected[2][1:] and messages:
-        newest = messages[-1]
+    if selected is not None and not selected[2][len(identity) + 1 :] and history:
+        newest = history[-1]
         content = newest.get("content") if isinstance(newest, dict) else None
         if isinstance(content, str) and content:
             low, high = 0, len(content)
@@ -200,7 +250,7 @@ def _bounded_bootstrap(messages, tools, choice, native, maximum):
                 tail_last = copy.deepcopy(newest)
                 tail_last["content"] = content[-keep:]
                 current = candidate(
-                    [*messages[:-1], omitted_last], [tail_last]
+                    [*history[:-1], omitted_last], [tail_last]
                 )
                 if fits(current[2]):
                     low = keep
@@ -340,6 +390,7 @@ class NativeBridgeClient:
             try:
                 # Validate canonical input before any native startup or spool write.
                 HistoryTracker().prepare(messages, tools, choice)
+                messages = _with_session_identity(messages, binding)
                 switching = False
                 if state.native is not None and (
                     state.native.closed

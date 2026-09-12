@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from claude_native_bridge.client import NativeBridgeClient
+from claude_native_bridge.client import NativeBridgeClient, _with_session_identity
 from claude_native_bridge.native import NativeSession, NativeSessionLost
 from claude_native_bridge.protocol import HistoryTracker
 from claude_native_bridge.settings import NativeBridgeError, Settings
@@ -80,7 +80,7 @@ def test_dead_native_is_typed_and_next_request_rebuilds_from_canonical_history(t
     assert len(RebuildNative.instances) == 2
     rebuilt = RebuildNative.instances[1].frames[0]
     assert rebuilt["operation"] == "bootstrap"
-    assert rebuilt["messages"] == following
+    assert rebuilt["messages"] == _with_session_identity(following, "rebuild-test")
     bridge.close()
 
 
