@@ -136,3 +136,17 @@ child ends. Capacity: foreground sessions + `max_concurrent_children` must
 stay <= `claude_native_bridge.max_sessions` (6 covers 2 foreground + 3
 children with headroom). This is a deliberate per-use setting; the default
 delegation route stays on the cheaper provider.
+
+## Claude Code compatibility
+
+The ordinary native bridge, streaming, Hermes tools, and lifecycle are verified
+with Claude Code 2.1.270 on Linux and macOS. Direct `read_result` MCP paging is
+verified with 2.1.269 on Linux. In 2.1.270, Claude may omit the auxiliary
+`read_result` tool (macOS) or produce conflicting MessageDisplay batches during
+a synthetic paged-result run (Linux). Normal Hermes oversized results still
+work through Hermes' spillover-file + `read_file` path; session
+`20260912_195531_0486be` completed the formerly failing 69k-result review.
+Until the Claude CLI behavior is resolved, the Linux bridge can pin
+`claude_native_bridge.command` to the installed 2.1.269 binary when direct MCP
+paging is required. Do not pin macOS to 2.1.269 after credentials have been
+refreshed by 2.1.270; normal 2.1.270 operation is the verified Mac route.
