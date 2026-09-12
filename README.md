@@ -137,6 +137,23 @@ stay <= `claude_native_bridge.max_sessions` (6 covers 2 foreground + 3
 children with headroom). This is a deliberate per-use setting; the default
 delegation route stays on the cheaper provider.
 
+## Large tool batches and session identity
+
+Paging applies to both an individually oversized tool result and a contiguous
+batch whose combined text exceeds `page_threshold`. Every result in an
+over-limit batch is spooled under the native run directory and replaced by a
+small, deterministic `read_result` envelope before the channel event is built.
+This prevents the aggregate-message overflow seen when several individually
+small tool results arrived together. Duplicate/overlapping `respond` calls
+remain fail-closed; the fix prevents the lost-rendezvous state rather than
+making uncertain tool calls replayable.
+
+Every bound native frame also receives a stable synthetic metadata message
+containing the canonical Hermes session ID. It explicitly marks bridge runtime
+directory names as opaque, so the model never has to infer session identity
+from `session-*` folders. Bounded model-switch bootstraps preserve this metadata
+outside the truncatable history tail.
+
 ## Claude Code compatibility
 
 The ordinary native bridge, streaming, Hermes tools, and lifecycle are verified
