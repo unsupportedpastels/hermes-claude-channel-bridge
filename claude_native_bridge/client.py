@@ -15,7 +15,7 @@ from types import SimpleNamespace as NS
 import httpx
 import yaml
 
-from .native import MODELS, NativeSession
+from .native import MODELS, NativeSession, NativeSessionLost
 from .protocol import HistoryTracker, build_completion
 from .settings import NativeBridgeError, Settings
 
@@ -258,6 +258,7 @@ class NativeBridgeClient:
                     )
                 state = self._bindings.setdefault(key, Binding(HistoryTracker()))
                 self._active = True
+            exchange_started = False
             try:
                 # Validate canonical input before any native startup or spool write.
                 HistoryTracker().prepare(messages, tools, choice)
@@ -297,6 +298,7 @@ class NativeBridgeClient:
                     frame = state.history.prepare(paged_messages, tools, choice)
                 assert frame is not None and paged_messages is not None
                 request_id = str(uuid.uuid4())
+                exchange_started = True
                 response = state.native.exchange(
                     frame["content"],
                     request_id,
@@ -322,6 +324,34 @@ class NativeBridgeClient:
                 return (
                     CompletedStream(completion) if kwargs.get("stream") else completion
                 )
+            except NativeSessionLost:
+                if state.native:
+                    state.native.close()
+                state.native = None
+                state.history.reset()
+                raise
+            except NativeBridgeError as exc:
+                native = state.native
+                session_lost = False
+                health = getattr(native, "health", None)
+                if native is not None and exchange_started and callable(health):
+                    try:
+                        session_lost = not health()
+                    except BaseException:
+                        # An inconclusive liveness probe is still an ambiguous failure.
+                        session_lost = False
+                if session_lost:
+                    assert native is not None
+                    native.close()
+                    state.native = None
+                    state.history.reset()
+                    raise NativeSessionLost(
+                        "Native session was lost; retry to rebuild from canonical history. "
+                        "The uncertain in-flight request was not replayed."
+                    ) from exc
+                # Once a response is uncertain, never retry against this hidden native state.
+                self.close()
+                raise
             except BaseException:
                 # Once a response is uncertain, never retry against this hidden native state.
                 self.close()

@@ -27,6 +27,10 @@ from .usage import usage_for_request
 from .platform_support import native_environment, script_command
 
 
+class NativeSessionLost(NativeBridgeError):
+    """The native process disappeared; retry only as a fresh canonical bootstrap."""
+
+
 def child_environment(source=None):
     return native_environment(source)
 
@@ -328,6 +332,18 @@ class NativeSession:
                 "Native bridge transport failed; response state is uncertain and will not be replayed automatically."
             ) from exc
 
+    def health(self):
+        """Return whether the dedicated native terminal is still alive."""
+        if self.closed or self.runtime is None or self.port is None:
+            return False
+        try:
+            return (
+                self._tmux("has-session", "-t", "worker", check=False).returncode
+                == 0
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+
     def _usage_snapshot(self):
         try:
             return json.loads((self.runtime / "native-usage.json").read_text())
@@ -476,8 +492,18 @@ class NativeSession:
             raise TimeoutError(
                 "Native inference timed out; the dedicated session was stopped."
             )
-        except BaseException:
+        except BaseException as exc:
+            session_lost = (
+                isinstance(exc, NativeBridgeError)
+                and not self.closed
+                and not self.health()
+            )
             self.close()
+            if session_lost:
+                raise NativeSessionLost(
+                    "Native session was lost; retry to rebuild from canonical history. "
+                    "The uncertain in-flight request was not replayed."
+                ) from exc
             raise
         finally:
             with self._lock:
