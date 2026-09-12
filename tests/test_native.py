@@ -1,10 +1,16 @@
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from claude_native_bridge import models, native
 from claude_native_bridge.settings import Settings, NativeBridgeError
 
-from claude_native_bridge.native import native_argv, child_environment, consent_key
+from claude_native_bridge.native import (
+    native_argv,
+    child_environment,
+    consent_key,
+    macos_keychain_login_available,
+)
 
 
 class NativeLaunchTests(unittest.TestCase):
@@ -73,6 +79,52 @@ class NativeLaunchTests(unittest.TestCase):
         self.assertNotIn("OTHER_SECRET", env)
         self.assertEqual(env["HOME"], "/home/test")
         self.assertEqual(env["CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS"], "0")
+
+    def test_macos_keychain_metadata_allows_interactive_startup_fallback(self):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return SimpleNamespace(returncode=0)
+
+        self.assertTrue(
+            macos_keychain_login_available(
+                {"USER": "mark", "HOME": "/Users/mark"},
+                run=run,
+                platform="darwin",
+            )
+        )
+        self.assertEqual(
+            calls[0][0],
+            [
+                "/usr/bin/security",
+                "find-generic-password",
+                "-a",
+                "mark",
+                "-s",
+                "Claude Code-credentials",
+            ],
+        )
+        self.assertNotIn("-w", calls[0][0])
+
+    def test_macos_keychain_fallback_rejects_other_platforms_and_missing_item(self):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return SimpleNamespace(returncode=44)
+
+        self.assertFalse(
+            macos_keychain_login_available(
+                {"USER": "mark"}, run=run, platform="darwin"
+            )
+        )
+        self.assertFalse(
+            macos_keychain_login_available(
+                {"USER": "mark"}, run=run, platform="linux"
+            )
+        )
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":

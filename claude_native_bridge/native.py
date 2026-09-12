@@ -35,6 +35,42 @@ def child_environment(source=None):
     return native_environment(source)
 
 
+def macos_keychain_login_available(
+    env, run=subprocess.run, *, platform=None
+):
+    """Check only for Claude's keychain item; never read its secret.
+
+    Claude Code's noninteractive ``auth status`` can report logged out on
+    macOS even though a fresh interactive process authenticates from the
+    login keychain. The native channel handshake remains the authoritative
+    startup check, and ``child_environment`` strips API-key fallbacks.
+    """
+    platform = sys.platform if platform is None else platform
+    if platform != "darwin":
+        return False
+    account = env.get("USER") or env.get("LOGNAME")
+    if not account:
+        return False
+    try:
+        probe = run(
+            [
+                "/usr/bin/security",
+                "find-generic-password",
+                "-a",
+                account,
+                "-s",
+                "Claude Code-credentials",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
+
+
 def native_argv(command, session_id, mcp_path, model, effort):
     return [
         command,
@@ -175,14 +211,18 @@ class NativeSession:
         try:
             status = json.loads(auth.stdout)
         except (json.JSONDecodeError, TypeError):
-            raise NativeBridgeError(
-                "Could not verify native Claude login. Run claude auth status yourself."
-            ) from None
-        if (
-            auth.returncode
-            or not status.get("loggedIn")
-            or status.get("authMethod") != "claude.ai"
-        ):
+            status = None
+        authenticated = (
+            status is not None
+            and not auth.returncode
+            and status.get("loggedIn")
+            and status.get("authMethod") == "claude.ai"
+        )
+        if not authenticated and not macos_keychain_login_available(env):
+            if status is None:
+                raise NativeBridgeError(
+                    "Could not verify native Claude login. Run claude auth status yourself."
+                ) from None
             raise NativeBridgeError(
                 "A native claude.ai login is required. Run claude auth login; no API-key fallback is allowed."
             )
