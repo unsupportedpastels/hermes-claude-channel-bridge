@@ -9,7 +9,16 @@ from pathlib import Path
 import socket
 import tempfile
 
+import yaml
+
+from .settings import Settings
 from .supervisor import sweep_orphaned_runs
+
+
+def configured_owner_limit(home):
+    path = Path(home) / "config.yaml"
+    raw = yaml.safe_load(path.read_text()) if path.exists() else {}
+    return Settings.from_mapping((raw or {}).get("claude_native_bridge", {})).max_sessions
 
 
 def main(argv=None):
@@ -72,7 +81,11 @@ def main(argv=None):
 
     try:
         config = uvicorn.Config(
-            create_app(token, args.home),
+            create_app(
+                token,
+                args.home,
+                owner_limit=configured_owner_limit(args.home),
+            ),
             host="127.0.0.1",
             port=port,
             access_log=False,

@@ -92,7 +92,8 @@ class OrphanSweepTests(unittest.TestCase):
                 self.assertEqual(path, home)
                 events.append("sweep")
 
-            def create_app(*args):
+            def create_app(*args, **kwargs):
+                self.assertEqual(kwargs, {"owner_limit": 2})
                 events.append("app")
                 return object()
 

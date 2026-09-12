@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from claude_native_bridge.api_config import api_storage, api_base_url, configured_port
+from claude_native_bridge.api_server import configured_owner_limit
 from claude_native_bridge.api_service import ensure_server
 
 
@@ -40,6 +41,14 @@ class APIConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ensure_server(Path(folder), "placeholder")
             self.assertFalse((Path(folder) / "claude-native-bridge").exists())
+
+    def test_api_owner_limit_uses_plugin_max_sessions_setting(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            (home / "config.yaml").write_text(
+                "claude_native_bridge:\n  max_sessions: 6\n"
+            )
+            self.assertEqual(configured_owner_limit(home), 6)
 
 
 if __name__ == "__main__":

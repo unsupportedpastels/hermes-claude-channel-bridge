@@ -57,7 +57,7 @@ class Engine:
         self.closed.set()
 
 
-def app_factory(tmp_path, behavior=None):
+def app_factory(tmp_path, behavior=None, owner_limit=None):
     engines = []
 
     def factory(**kw):
@@ -66,7 +66,9 @@ def app_factory(tmp_path, behavior=None):
         engines.append(engine)
         return engine
 
-    return create_app(TOKEN, tmp_path, factory), engines
+    return create_app(
+        TOKEN, tmp_path, factory, owner_limit=owner_limit
+    ), engines
 
 
 def test_auth_catalog_and_ordinary_completion(tmp_path):
@@ -88,6 +90,32 @@ def test_auth_catalog_and_ordinary_completion(tmp_path):
         assert engines[0].calls[0]["extra_body"] == {"hermes_session_id": "session-a"}
         assert engines[0].calls[0]["stream"] is False
     assert engines[0].closed.is_set()
+
+
+def test_explicit_owner_close_releases_native_and_is_idempotent(tmp_path):
+    app, engines = app_factory(tmp_path)
+    with TestClient(app) as client:
+        assert client.post("/v1/chat/completions", headers=HEADERS, json=BODY).status_code == 200
+        assert not engines[0].closed.is_set()
+        assert client.post("/v1/owner/close").status_code == 401
+        result = client.post("/v1/owner/close", headers=HEADERS)
+        assert result.status_code == 200
+        assert result.json() == {"closed": True}
+        assert engines[0].closed.is_set()
+        assert client.post("/v1/owner/close", headers=HEADERS).json() == {"closed": False}
+
+
+def test_configured_owner_capacity_is_global_and_close_frees_slot(tmp_path):
+    app, engines = app_factory(tmp_path, owner_limit=1)
+    owner_b = dict(HEADERS, **{"X-Hermes-Bridge-Client": "owner-b"})
+    with TestClient(app) as client:
+        assert client.post("/v1/chat/completions", headers=HEADERS, json=BODY).status_code == 200
+        blocked = client.post("/v1/chat/completions", headers=owner_b, json=BODY)
+        assert blocked.status_code == 429
+        assert len(engines) == 1
+        assert client.post("/v1/owner/close", headers=HEADERS).json() == {"closed": True}
+        assert client.post("/v1/chat/completions", headers=owner_b, json=BODY).status_code == 200
+        assert len(engines) == 2
 
 
 def test_duplicates_owner_and_missing_binding_isolation(tmp_path):

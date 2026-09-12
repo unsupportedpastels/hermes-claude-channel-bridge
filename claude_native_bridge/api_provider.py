@@ -3,8 +3,10 @@
 import inspect
 import os
 from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 import uuid
 
+from openai import OpenAI
 from providers import register_provider
 from providers.base import ProviderProfile
 
@@ -12,9 +14,40 @@ from .api_config import TOKEN_ENV, active_home, api_base_url
 from .models import MODELS, reasoning_efforts
 
 
+class BridgeOpenAI(OpenAI):
+    """OpenAI client that releases its plugin-owned native owner on close."""
+
+    def __init__(self, *args, bridge_close_url, bridge_token, bridge_owner, **kwargs):
+        self._bridge_close_url = bridge_close_url
+        self._bridge_token = bridge_token
+        self._bridge_owner = bridge_owner
+        self._bridge_owner_closed = False
+        super().__init__(*args, **kwargs)
+
+    def close(self):
+        if not self._bridge_owner_closed:
+            self._bridge_owner_closed = True
+            request = Request(
+                self._bridge_close_url,
+                data=b"",
+                method="POST",
+                headers={
+                    "Authorization": "Bearer " + self._bridge_token,
+                    "X-Hermes-Bridge-Client": self._bridge_owner,
+                },
+            )
+            try:
+                response = urlopen(request, timeout=2)
+                response.close()
+            except Exception:
+                # Closing the local SDK client must remain safe during process
+                # shutdown or when the bridge server has already exited.
+                pass
+        super().close()
+
+
 class ClaudeAPIProfile(ProviderProfile):
     def create_client(self, **kwargs):
-        from openai import OpenAI
         from .api_service import ensure_server
 
         home = active_home()
@@ -33,9 +66,15 @@ class ClaudeAPIProfile(ProviderProfile):
         supported = set(inspect.signature(OpenAI).parameters)
         arguments = {key: value for key, value in kwargs.items() if key in supported}
         headers = dict(arguments.get("default_headers") or {})
-        headers["X-Hermes-Bridge-Client"] = str(uuid.uuid4())
+        owner = str(uuid.uuid4())
+        headers["X-Hermes-Bridge-Client"] = owner
         arguments.update(api_key=token, base_url=base_url, default_headers=headers)
-        return OpenAI(**arguments)
+        return BridgeOpenAI(
+            **arguments,
+            bridge_close_url=base_url.rstrip("/") + "/owner/close",
+            bridge_token=token,
+            bridge_owner=owner,
+        )
 
     def build_extra_body(self, *, session_id=None, **context):
         return {"hermes_session_id": session_id} if session_id else {}

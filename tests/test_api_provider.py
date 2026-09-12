@@ -1,10 +1,11 @@
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from openai import OpenAI
-from claude_native_bridge.api_provider import make_profile
+from claude_native_bridge.api_provider import BridgeOpenAI, make_profile
 from claude_native_bridge.models import MODELS
 
 
@@ -47,6 +48,27 @@ class APIProviderTests(unittest.TestCase):
                 finally:
                     a.close()
                     b.close()
+
+    def test_client_close_releases_exact_api_owner_once(self):
+        response = SimpleNamespace(close=lambda: None)
+        with patch(
+            "claude_native_bridge.api_provider.urlopen", return_value=response
+        ) as send:
+            client = BridgeOpenAI(
+                api_key="x" * 40,
+                base_url="http://127.0.0.1:19876/v1",
+                bridge_close_url="http://127.0.0.1:19876/v1/owner/close",
+                bridge_token="x" * 40,
+                bridge_owner="owner-test",
+            )
+            client.close()
+            client.close()
+        self.assertEqual(send.call_count, 1)
+        request = send.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:19876/v1/owner/close")
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(request.get_header("Authorization"), "Bearer " + "x" * 40)
+        self.assertEqual(request.get_header("X-hermes-bridge-client"), "owner-test")
 
     def test_bridge_key_is_not_sent_to_a_nonlocal_or_legacy_uri(self):
         with tempfile.TemporaryDirectory() as folder:

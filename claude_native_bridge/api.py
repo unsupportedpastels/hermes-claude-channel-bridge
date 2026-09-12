@@ -236,8 +236,9 @@ async def _close(owner):
 
 
 class Owners:
-    def __init__(self, factory, home):
+    def __init__(self, factory, home, limit=None):
         self.factory, self.home = factory, home
+        self.limit = MAX_OWNERS if limit is None else limit
         self.items = {}
 
     async def prune(self):
@@ -253,7 +254,7 @@ class Owners:
                 409, "Owner already has an active request; no inference started"
             )
         if owner is None:
-            if len(self.items) >= MAX_OWNERS:
+            if len(self.items) >= self.limit:
                 raise HTTPException(429, "Bridge owner capacity reached")
             owner = Owner(None, ephemeral=ephemeral)
             self.items[key] = owner
@@ -289,6 +290,16 @@ class Owners:
         owner.busy = False
         owner.task = None
         owner.touched = time.monotonic()
+
+    async def close_owner(self, key):
+        owner = self.items.pop(key, None)
+        if owner is None:
+            return False
+        await _close(owner)
+        if owner.task is not None:
+            owner.task.cancel()
+            await asyncio.gather(owner.task, return_exceptions=True)
+        return True
 
     async def shutdown(self):
         owners = list(self.items.values())
@@ -326,7 +337,7 @@ class _ClosingStreamingResponse(StreamingResponse):
                 await self.cleanup()
 
 
-def create_app(token, home, engine_factory=None):
+def create_app(token, home, engine_factory=None, owner_limit=None):
     """Build a lazy service. Factory accepts ``hermes_home=home``; no launch here."""
     if not isinstance(token, str) or not token.strip() or token != token.strip():
         raise ValueError("A nonempty bridge bearer credential is required")
@@ -334,7 +345,7 @@ def create_app(token, home, engine_factory=None):
         from .client import NativeBridgeClient
 
         engine_factory = NativeBridgeClient
-    owners = Owners(engine_factory, home)
+    owners = Owners(engine_factory, home, limit=owner_limit)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -384,6 +395,14 @@ def create_app(token, home, engine_factory=None):
                 for model in MODELS
             ],
         }
+
+    @app.post("/v1/owner/close")
+    async def close_owner(request: Request):
+        authenticate(request)
+        key = request.headers.get("x-hermes-bridge-client", "")
+        if not key or len(key) > 512:
+            raise HTTPException(400, "Invalid owner identifier")
+        return {"closed": await owners.close_owner(key)}
 
     @app.post("/v1/chat/completions")
     async def completions(request: Request):
