@@ -9,6 +9,124 @@ import sys
 import time
 
 
+def _pid_is_live(pid):
+    """Return liveness without relying on Linux-only process files."""
+    if type(pid) is not int or not 0 < pid <= 2**31 - 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _ps_identity(pid):
+    """Return a stable-enough ps fingerprint and process group for a live PID."""
+    if not _pid_is_live(pid):
+        return None
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "pgid=", "-o", "lstart=", "-o", "args="],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    output = result.stdout.strip()
+    if result.returncode or not output:
+        return None
+    fields = output.split(maxsplit=1)
+    if len(fields) != 2:
+        return None
+    try:
+        process_group = int(fields[0])
+    except ValueError:
+        return None
+    return process_group, output
+
+
+def _native_identity(pid):
+    identity = _ps_identity(pid)
+    if identity is None or "claude" not in identity[1].lower():
+        return None
+    # NativeSession launches the CLI as leader of its own process group. Refuse
+    # to signal any other group: a mismatched group is stale/reused metadata.
+    if identity[0] != pid:
+        return None
+    return identity
+
+
+def _kill_tmux_server(runtime):
+    try:
+        launch = json.loads((runtime / "launch.json").read_text())
+    except (OSError, ValueError):
+        return
+    session_id = launch.get("session_id")
+    if not isinstance(session_id, str) or not session_id or len(session_id) > 128:
+        return
+    try:
+        subprocess.run(
+            ["tmux", "-L", "hcb-" + session_id, "kill-server"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _terminate_native(pid, identity):
+    """Terminate only while PID, start time, argv, and process group still match."""
+    for sig, seconds in ((signal.SIGTERM, 2), (signal.SIGKILL, 1)):
+        if _native_identity(pid) != identity:
+            return
+        try:
+            os.killpg(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if _ps_identity(pid) != identity:
+                return
+            time.sleep(0.05)
+
+
+def _archive_run(runtime):
+    """Archive by directory rename so startup will never sweep the run twice."""
+    target = runtime.with_name(runtime.name + ".archived")
+    if target.exists():
+        target = runtime.with_name(runtime.name + f".archived-{time.time_ns()}")
+    runtime.rename(target)
+    return target
+
+
+def sweep_orphaned_runs(home):
+    """Kill verified orphaned Claude groups and archive every prior run directory."""
+    runs = Path(home) / "claude-native-bridge" / "runs"
+    if not runs.is_dir():
+        return []
+    archived = []
+    for runtime in sorted(runs.glob("session-*")):
+        if not runtime.is_dir() or ".archived" in runtime.name:
+            continue
+        try:
+            receipt = json.loads((runtime / "native-pid.json").read_text())
+            pid = receipt.get("pid")
+        except (OSError, ValueError):
+            pid = None
+        identity = _native_identity(pid)
+        if identity is not None:
+            _kill_tmux_server(runtime)
+            _terminate_native(pid, identity)
+        archived.append(_archive_run(runtime))
+    return archived
+
+
 def _darwin_process_start(pid):
     # libproc exposes microsecond-resolution creation time. `ps lstart` only
     # has second precision and can mistake a rapidly reused PID for its owner.

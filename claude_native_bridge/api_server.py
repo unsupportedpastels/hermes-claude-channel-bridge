@@ -9,6 +9,8 @@ from pathlib import Path
 import socket
 import tempfile
 
+from .supervisor import sweep_orphaned_runs
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
@@ -28,6 +30,8 @@ def main(argv=None):
     token = args.token_file.read_text(encoding="utf-8").strip()
     if not token:
         parser.error("credential file is empty")
+
+    sweep_orphaned_runs(args.home)
 
     import uvicorn
     from .api import create_app
