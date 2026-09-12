@@ -18,6 +18,7 @@ class Settings:
     idle_timeout: float = 300.0
     max_sessions: int = 2
     page_threshold: int = 20_000
+    bootstrap_max_chars: int = 100_000
     retain_diagnostics: bool = False
 
     @classmethod
@@ -46,6 +47,11 @@ class Settings:
             raise NativeBridgeError("max_sessions must be an integer from 1 to 8")
         if type(value.page_threshold) is not int or value.page_threshold <= 0:
             raise NativeBridgeError("page_threshold must be a positive integer")
+        if (
+            type(value.bootstrap_max_chars) is not int
+            or value.bootstrap_max_chars <= 0
+        ):
+            raise NativeBridgeError("bootstrap_max_chars must be a positive integer")
         if not isinstance(value.command, str) or not value.command.strip():
             raise NativeBridgeError("command must name the installed Claude executable")
         if value.effort not in ("low", "medium", "high", "xhigh", "max"):

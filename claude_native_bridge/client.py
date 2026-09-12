@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import json
 import os
 import threading
 import uuid
@@ -26,6 +27,8 @@ class Binding:
     native: NativeSession | None = None
     model: str = ""
     effort: str = ""
+    source_history: HistoryTracker | None = None
+    compacted_messages: list[dict] | None = None
 
 
 class CompletedStream:
@@ -148,6 +151,79 @@ def _page_tool_results(messages, native, threshold):
     return paged
 
 
+def _bounded_bootstrap(messages, tools, choice, native, maximum):
+    """Return a newest-message suffix whose complete bootstrap frame is bounded."""
+    tracker = HistoryTracker()
+    if len(tracker.prepare(messages, tools, choice)["content"]) <= maximum:
+        return copy.deepcopy(messages), False
+
+    runtime = getattr(native, "runtime", None)
+    if runtime is None:
+        raise NativeBridgeError("Native runtime unavailable for bounded bootstrap")
+
+    def candidate(omitted_messages, tail):
+        omitted = json.dumps(
+            omitted_messages, ensure_ascii=False, separators=(",", ":")
+        )
+        predicted = "r" + hashlib.sha256(omitted.encode("utf-8")).hexdigest()[:32]
+        notice = (
+            f"[Earlier conversation omitted: {len(omitted)} chars. "
+            f"Ask read_result handle '{predicted}' for older windows if needed.]"
+        )
+        bounded = [
+            {"role": "system", "content": notice},
+            *copy.deepcopy(tail),
+        ]
+        return omitted, predicted, bounded
+
+    def fits(bounded):
+        return len(tracker.prepare(bounded, tools, choice)["content"]) <= maximum
+
+    selected = None
+    for start in range(1, len(messages) + 1):
+        current = candidate(messages[:start], messages[start:])
+        if fits(current[2]):
+            selected = current
+            break
+
+    # A single newest text message can itself exceed the limit. Preserve as much
+    # of its newest content as possible rather than reducing the tail to empty.
+    if selected is not None and not selected[2][1:] and messages:
+        newest = messages[-1]
+        content = newest.get("content") if isinstance(newest, dict) else None
+        if isinstance(content, str) and content:
+            low, high = 0, len(content)
+            while low < high:
+                keep = (low + high + 1) // 2
+                omitted_last = copy.deepcopy(newest)
+                omitted_last["content"] = content[:-keep]
+                tail_last = copy.deepcopy(newest)
+                tail_last["content"] = content[-keep:]
+                current = candidate(
+                    [*messages[:-1], omitted_last], [tail_last]
+                )
+                if fits(current[2]):
+                    low = keep
+                    selected = current
+                else:
+                    high = keep - 1
+
+    if selected is None:
+        raise NativeBridgeError(
+            "bootstrap_max_chars is too small for the bootstrap metadata and omission notice"
+        )
+    omitted, predicted, bounded = selected
+    handle = _write_spool(Path(runtime), omitted)
+    if handle != predicted:
+        raise NativeBridgeError("Bounded bootstrap handle mismatch")
+    return bounded, True
+
+
+def _clear_bootstrap_tail(state):
+    state.source_history = None
+    state.compacted_messages = None
+
+
 class NativeBridgeClient:
     HERMES_SKIP_TRANSPORT_WRAP = True
     HERMES_SKIP_ASYNC_WRAP = True
@@ -264,21 +340,41 @@ class NativeBridgeClient:
             try:
                 # Validate canonical input before any native startup or spool write.
                 HistoryTracker().prepare(messages, tools, choice)
+                switching = False
                 if state.native is not None and (
                     state.native.closed
                     or state.model != model
                     or state.effort != effort
                 ):
+                    switching = state.model != model or state.effort != effort
                     state.native.close()
                     state.native = None
                     state.history.reset()
+                    if switching:
+                        _clear_bootstrap_tail(state)
 
                 frame = None
                 paged_messages = None
+                source_messages = None
                 if state.native is not None:
-                    paged_messages = _page_tool_results(
+                    paged_source = _page_tool_results(
                         messages, state.native, settings.page_threshold
                     )
+                    if state.source_history is not None:
+                        source_frame = state.source_history.prepare(
+                            paged_source, tools, choice
+                        )
+                        if source_frame["reset"]:
+                            _clear_bootstrap_tail(state)
+                            paged_messages = paged_source
+                        else:
+                            delta = json.loads(source_frame["content"])["messages"]
+                            paged_messages = copy.deepcopy(
+                                state.compacted_messages or []
+                            ) + delta
+                            source_messages = paged_source
+                    else:
+                        paged_messages = paged_source
                     frame = state.history.prepare(paged_messages, tools, choice)
                     if frame["reset"]:
                         state.native.close()
@@ -294,9 +390,36 @@ class NativeBridgeClient:
                     state.model = model
                     state.effort = effort
                     native.start()
-                    paged_messages = _page_tool_results(
+                    paged_source = _page_tool_results(
                         messages, native, settings.page_threshold
                     )
+                    if state.source_history is not None:
+                        source_frame = state.source_history.prepare(
+                            paged_source, tools, choice
+                        )
+                        if source_frame["reset"]:
+                            _clear_bootstrap_tail(state)
+                            paged_messages = paged_source
+                        else:
+                            delta = json.loads(source_frame["content"])["messages"]
+                            paged_messages = copy.deepcopy(
+                                state.compacted_messages or []
+                            ) + delta
+                            source_messages = paged_source
+                    elif switching:
+                        paged_messages, compacted = _bounded_bootstrap(
+                            paged_source,
+                            tools,
+                            choice,
+                            native,
+                            settings.bootstrap_max_chars,
+                        )
+                        if compacted:
+                            state.source_history = HistoryTracker()
+                            state.compacted_messages = copy.deepcopy(paged_messages)
+                            source_messages = paged_source
+                    else:
+                        paged_messages = paged_source
                     frame = state.history.prepare(paged_messages, tools, choice)
                 assert frame is not None and paged_messages is not None
                 request_id = str(uuid.uuid4())
@@ -320,9 +443,13 @@ class NativeBridgeClient:
                 completion.native_bridge_response_source = getattr(
                     state.native, "last_response_source", "respond"
                 )
-                state.history.commit(
-                    paged_messages, tools, choice, assistant_dict(completion)
-                )
+                assistant = assistant_dict(completion)
+                state.history.commit(paged_messages, tools, choice, assistant)
+                if state.source_history is not None and source_messages is not None:
+                    state.source_history.commit(source_messages, tools, choice, assistant)
+                    state.compacted_messages = copy.deepcopy(paged_messages) + [
+                        copy.deepcopy(assistant)
+                    ]
                 return (
                     CompletedStream(completion) if kwargs.get("stream") else completion
                 )
