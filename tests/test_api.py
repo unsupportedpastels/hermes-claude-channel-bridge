@@ -513,6 +513,7 @@ def test_cli_port_zero_readiness_health_no_inference(tmp_path):
     token_file, ready = tmp_path / "token", tmp_path / "ready.json"
     token_file.write_text(TOKEN)
     token_file.chmod(0o600)
+    package_root = Path(__file__).resolve().parents[1]
     process = subprocess.Popen(
         [
             sys.executable,
@@ -527,19 +528,36 @@ def test_cli_port_zero_readiness_health_no_inference(tmp_path):
             "--port",
             "0",
         ],
-        cwd=Path(__file__).resolve().parents[1],
+        cwd=package_root,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     try:
         deadline = time.monotonic() + 8
         while not ready.exists():
-            assert process.poll() is None, process.communicate()
+            status = process.poll()
+            assert status is None or (sys.platform == "win32" and status == 0)
             assert time.monotonic() < deadline
             time.sleep(0.03)
         receipt = json.loads(ready.read_text())
         assert receipt["host"] == "127.0.0.1" and receipt["port"] > 0
-        assert receipt["pid"] == process.pid
+        if sys.platform == "win32":
+            import psutil
+
+            assert psutil.Process(receipt["pid"]).cmdline()[1:] == [
+                "-m",
+                "claude_native_bridge.api_server",
+                "--home",
+                str(tmp_path),
+                "--token-file",
+                str(token_file),
+                "--ready-file",
+                str(ready),
+                "--port",
+                "0",
+            ]
+        else:
+            assert receipt["pid"] == process.pid
         assert TOKEN not in ready.read_text()
         with httpx.Client(trust_env=False, timeout=2) as http:
             assert http.get(receipt["health_url"]).status_code == 401
@@ -552,14 +570,29 @@ def test_cli_port_zero_readiness_health_no_inference(tmp_path):
                 == 200
             )
     finally:
-        process.terminate()
+        if sys.platform == "win32" and ready.exists():
+            import psutil
+
+            try:
+                service = psutil.Process(json.loads(ready.read_text())["pid"])
+                service.terminate()
+                service.wait(10)
+            except psutil.NoSuchProcess:
+                pass
+        if process.poll() is None:
+            process.terminate()
         try:
             output, error = process.communicate(timeout=10)
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate()
             raise
-    assert not ready.exists()
+    if sys.platform == "win32":
+        # terminate() is TerminateProcess on Windows; no Python finally/signal
+        # handler can run. The managed stop_server path removes its own receipt.
+        ready.unlink()
+    else:
+        assert not ready.exists()
     assert TOKEN.encode() not in output + error
 
 

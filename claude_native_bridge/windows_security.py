@@ -101,3 +101,38 @@ def secure_runtime_directory(path: Path) -> Path:
         raise OSError("Runtime ACL verification failed")
     _reject_reparse(path)
     return path
+
+
+def assert_private_file(path: Path) -> Path:
+    """Verify that a Windows runtime file is real, owner-owned and owner-only."""
+    if sys.platform != "win32":
+        raise OSError("Windows runtime security requires Windows")
+    import win32api
+    import win32con
+    import win32security
+
+    path = Path(path)
+    if not path.is_absolute() or not path.is_file():
+        raise ValueError("Runtime file must be an absolute regular file")
+    _reject_reparse(path)
+    token = win32security.OpenProcessToken(
+        win32api.GetCurrentProcess(), win32con.TOKEN_QUERY
+    )
+    try:
+        sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+    finally:
+        token.Close()
+    info = win32security.GetNamedSecurityInfo(
+        str(path),
+        win32security.SE_FILE_OBJECT,
+        win32security.OWNER_SECURITY_INFORMATION
+        | win32security.DACL_SECURITY_INFORMATION,
+    )
+    acl = info.GetSecurityDescriptorDacl()
+    if info.GetSecurityDescriptorOwner() != sid or acl is None or not acl.GetAceCount():
+        raise ValueError("Runtime file must be owner-only")
+    for index in range(acl.GetAceCount()):
+        ace = acl.GetAce(index)
+        if ace[0][0] != win32security.ACCESS_ALLOWED_ACE_TYPE or ace[2] != sid:
+            raise ValueError("Runtime file must be owner-only")
+    return path

@@ -1,9 +1,11 @@
 import json
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 
 from claude_native_bridge.usage import capture_status, usage_for_request
+from claude_native_bridge.windows_security import assert_private_file, secure_runtime_directory
 
 
 def snapshot(requests=1):
@@ -66,6 +68,8 @@ class UsageTests(unittest.TestCase):
     def test_capture_keeps_only_usage_metadata_in_private_file(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
+            if sys.platform == "win32":
+                secure_runtime_directory(root)
             (root / "launch.json").write_text(json.dumps({"session_id": "native-test"}))
             data = snapshot()
             data["workspace"] = {"sensitive": "not needed"}
@@ -74,7 +78,10 @@ class UsageTests(unittest.TestCase):
             saved = json.loads((root / "native-usage.json").read_text())
             self.assertNotIn("workspace", saved)
             self.assertNotIn("cost", saved)
-            self.assertEqual((root / "native-usage.json").stat().st_mode & 0o777, 0o600)
+            if sys.platform == "win32":
+                assert_private_file(root / "native-usage.json")
+            else:
+                self.assertEqual((root / "native-usage.json").stat().st_mode & 0o777, 0o600)
             data["session_id"] = "foreign"
             self.assertFalse(capture_status(root, data))
 

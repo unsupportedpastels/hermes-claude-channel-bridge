@@ -68,11 +68,9 @@ test('real Windows protected ACL accepted; junction and public ACL refused',
     fs.symlinkSync(dir, junction, 'junction');
     assert.throws(() => assertPrivateRuntime(junction));
     fs.unlinkSync(junction);
-    run(`$ErrorActionPreference='Stop'
-      $acl=Get-Acl -LiteralPath '${literal}'
-      $sid=New-Object Security.Principal.SecurityIdentifier('S-1-1-0')
-      $rule=New-Object Security.AccessControl.FileSystemAccessRule($sid,'ReadAndExecute','Allow')
-      $acl.AddAccessRule($rule)
-      Set-Acl -LiteralPath '${literal}' -AclObject $acl`);
+    const icacls = path.join(process.env.SystemRoot, 'System32', 'icacls.exe');
+    execFileSync(icacls, [dir, '/grant', '*S-1-1-0:(RX)'], {
+      timeout: 10000, stdio: 'pipe', windowsHide: true,
+    });
     assert.throws(() => assertPrivateRuntime(dir));
   });

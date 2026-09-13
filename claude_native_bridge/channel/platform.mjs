@@ -55,6 +55,17 @@ export function assertPrivateRuntime(dir) {
   }
 }
 
+export function assertPrivateFile(file) {
+  if (!file || !path.isAbsolute(file)) throw new Error('file');
+  const stat = assertNoLinks(file);
+  if (!stat.isFile() || stat.nlink !== 1) throw new Error('file');
+  if (process.platform === 'win32') {
+    windowsPrivatePath(file, false);
+  } else if ((stat.mode & 0o077) || stat.uid !== process.getuid()) {
+    throw new Error('file');
+  }
+}
+
 export function readTransport(dir) {
   assertPrivateRuntime(dir);
   const file = path.join(dir, 'transport.json');

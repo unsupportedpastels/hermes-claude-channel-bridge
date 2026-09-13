@@ -119,24 +119,26 @@ def ensure_server(home, token, *, port=None):
         try:
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
-                if process.poll() is not None:
-                    raise RuntimeError(
-                        f"Local API exited during startup; inspect {log}"
-                    )
                 if ready.exists():
                     info = json.loads(ready.read_text())
-                    if info.get("pid") == process.pid and _health(
-                        info.get("port"), token
+                    try:
+                        service = psutil.Process(info.get("pid"))
+                        actual_argv = service.cmdline()
+                    except (psutil.Error, TypeError):
+                        service = None
+                        actual_argv = []
+                    if (
+                        service is not None
+                        and actual_argv[1:] == argv[1:]
+                        and _health(info.get("port"), token)
                     ):
                         _write_private(
                             root / "manager.json",
                             json.dumps(
                                 {
-                                    "pid": process.pid,
-                                    "created": psutil.Process(
-                                        process.pid
-                                    ).create_time(),
-                                    "argv": argv,
+                                    "pid": service.pid,
+                                    "created": service.create_time(),
+                                    "argv": actual_argv,
                                 }
                             ),
                         )
@@ -144,15 +146,31 @@ def ensure_server(home, token, *, port=None):
                             **info,
                             "base_url": f"http://127.0.0.1:{info['port']}/v1",
                         }
+                status = process.poll()
+                # A Windows venv python.exe is a redirector: it may exit zero
+                # after spawning the real interpreter recorded in ready.json.
+                if status is not None and not (sys.platform == "win32" and status == 0):
+                    raise RuntimeError(
+                        f"Local API exited during startup; inspect {log}"
+                    )
                 time.sleep(0.1)
             raise TimeoutError(f"Local API startup timed out; inspect {log}")
         except BaseException:
-            process.terminate()
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=3)
+            if ready.exists():
+                try:
+                    service = psutil.Process(json.loads(ready.read_text())["pid"])
+                    if service.cmdline()[1:] == argv[1:]:
+                        service.terminate()
+                        service.wait(timeout=3)
+                except (psutil.Error, KeyError, ValueError, json.JSONDecodeError):
+                    pass
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
             raise
 
 

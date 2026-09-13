@@ -1,14 +1,18 @@
 import json
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 from claude_native_bridge.native_hooks import capture, stopped_text
+from claude_native_bridge.windows_security import assert_private_file, secure_runtime_directory
 
 
 class NativeHookTests(unittest.TestCase):
     def test_real_final_text_is_preserved_but_api_error_is_never_success(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
+            if sys.platform == "win32":
+                secure_runtime_directory(root)
             (root / "active-request.json").write_text(
                 json.dumps({"request_id": "r", "session_id": "s"})
             )
@@ -24,7 +28,10 @@ class NativeHookTests(unittest.TestCase):
             )
             record = json.loads((root / "native-stop.json").read_text())
             self.assertEqual(stopped_text(record, "r", "s"), "A native refusal.")
-            self.assertEqual((root / "native-stop.json").stat().st_mode & 0o777, 0o600)
+            if sys.platform == "win32":
+                assert_private_file(root / "native-stop.json")
+            else:
+                self.assertEqual((root / "native-stop.json").stat().st_mode & 0o777, 0o600)
             capture(
                 root,
                 {
@@ -42,6 +49,8 @@ class NativeHookTests(unittest.TestCase):
     def test_foreign_session_stale_request_or_pending_background_is_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
+            if sys.platform == "win32":
+                secure_runtime_directory(root)
             (root / "active-request.json").write_text(
                 json.dumps({"request_id": "r", "session_id": "s"})
             )

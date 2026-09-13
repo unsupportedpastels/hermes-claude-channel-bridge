@@ -45,10 +45,10 @@ IDs were checked against official model documentation. Account availability and 
 | Platform | State |
 |---|---|
 | Linux | Live API, TUI, streaming, tools, learning and native-session reuse verified |
-| macOS | Native launcher/process lifecycle tests passed on a real Mac; end-to-end native inference still requires Claude Code login |
-| Windows | Native ConPTY/job/ACL backend integrated; native-only tests still require an unlocked Windows desktop and a valid native Claude login |
+| macOS | Native launcher/process lifecycle and ordinary end-to-end native inference verified on a real Mac; direct `read_result` paging remains CLI-version-sensitive |
+| Windows | Native ConPTY/job/ACL backend, managed API lifecycle, picker discovery, and installed-provider Sonnet inference verified on Windows 11 |
 
-Windows support is not WSL. ConPTY is used for background console control and startup consent, not for carrying model task data. The package does not claim full native Windows validation while its native-only tests remain unexecuted.
+Windows support is not WSL. ConPTY is used for background console control and startup consent, not for carrying model task data. Native Windows verification covers owner-only runtime ACLs, descendant cleanup, venv redirector supervision, channel protocol behavior, local gateway model discovery, and a real Sonnet response. Windows has no catchable `SIGTERM`; cleanup there is exercised through stdin EOF and the parent-owned Job Object instead.
 
 ## Installation and use
 

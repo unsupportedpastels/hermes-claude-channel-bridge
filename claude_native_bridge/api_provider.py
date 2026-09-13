@@ -50,8 +50,13 @@ class ClaudeAPIProfile(ProviderProfile):
     def create_client(self, **kwargs):
         from .api_service import ensure_server
 
-        home = active_home()
-        base_url = str(kwargs.get("base_url") or api_base_url(home))
+        configured = kwargs.get("base_url")
+        home = None
+        if configured:
+            base_url = str(configured)
+        else:
+            home = active_home()
+            base_url = api_base_url(home)
         parsed = urlsplit(base_url)
         if parsed.scheme != "http" or parsed.hostname not in (
             "127.0.0.1",
@@ -61,6 +66,8 @@ class ClaudeAPIProfile(ProviderProfile):
             raise ValueError(
                 "Claude bridge requires its configured loopback HTTP API; reselect the provider to migrate an old native URI"
             )
+        if home is None:
+            home = active_home()
         token = kwargs.get("api_key") or os.environ.get(TOKEN_ENV, "")
         ensure_server(home, token, port=parsed.port or 80)
         supported = set(inspect.signature(OpenAI).parameters)

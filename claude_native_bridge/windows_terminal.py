@@ -114,7 +114,9 @@ class WindowsTerminal:
                     != win32event.WAIT_TIMEOUT
                 ):
                     raise RuntimeError("Terminal owner already exited")
-                self._job = win32job.CreateJobObject(None, None)
+                # pywin32 311 rejects None for the optional name even though older
+                # releases accepted it. Empty string still creates an unnamed job.
+                self._job = win32job.CreateJobObject(None, "")
                 limits = win32job.QueryInformationJobObject(
                     self._job, win32job.JobObjectExtendedLimitInformation
                 )

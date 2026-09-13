@@ -31,7 +31,13 @@ test('stdin EOF exits promptly, rejects held SDK call, and removes owned readine
   assert.ok((await fs.stat(path.join(f.dir, 'transport.json'))).isFile());
 });
 
-test('SIGTERM cleans pending native and HTTP requests without an orphan server', {timeout: 10_000}, async t => {
+test('SIGTERM cleans pending native and HTTP requests without an orphan server', {
+  timeout: 10_000,
+  // Node implements kill(pid, 'SIGTERM') with TerminateProcess on Windows, so
+  // the child cannot run its JS signal handler there. Windows cleanup is covered
+  // by the stdin-EOF test above and the native Job Object lifecycle tests.
+  skip: process.platform === 'win32' ? 'Windows has no catchable SIGTERM' : false,
+}, async t => {
   const f = await fixture(t);
   await f.advance(null, 'a');
   const pending = f.respond(final);

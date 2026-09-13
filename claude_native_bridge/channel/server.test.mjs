@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {fixture, until} from './fixture-support.mjs';
+import {assertPrivateFile} from './platform.mjs';
 
 const final = (request_id, text = 'done') => ({request_id, kind: 'final', text});
 
@@ -39,7 +40,9 @@ test('SDK handshake, channel delivery, held rendezvous and next task after final
   assert.deepEqual(tools.map(tool => tool.name), ['respond', 'read_result']);
   assert.equal(tools[0].inputSchema.additionalProperties, false);
   assert.deepEqual(tools[0].inputSchema.properties.kind.enum, ['tool_calls']);
-  assert.equal((await fs.stat(path.join(f.dir, 'ready.json'))).mode & 0o777, 0o600);
+  const readyFile = path.join(f.dir, 'ready.json');
+  if (process.platform === 'win32') assert.doesNotThrow(() => assertPrivateFile(readyFile));
+  else assert.equal((await fs.stat(readyFile)).mode & 0o777, 0o600);
   assert.equal(f.ready.pid, f.transport.pid);
   assert.deepEqual((await f.api('/status')).body, {sequence: 0, current: null, held: null, failed: null});
   assert.equal((await f.advance(null, 'a', 'start')).status, 200);
