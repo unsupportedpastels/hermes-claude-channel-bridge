@@ -22,6 +22,9 @@ dependencies = [
 [project.entry-points."hermes_agent.plugins"]
 claude-native-bridge = "claude_native_bridge.provider:register"
 
+[project.scripts]
+hermes-claude-bridge = "claude_native_bridge.__main__:main"
+
 # Live harnesses must set their temporary HERMES_HOME before importing Hermes.
 [tool.ruff.lint.per-file-ignores]
 "evals/*.py" = ["E402"]

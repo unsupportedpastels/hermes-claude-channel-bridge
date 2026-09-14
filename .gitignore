@@ -1,4 +1,5 @@
 .private/
+.hermes/
 .venv/
 __pycache__/
 *.py[cod]

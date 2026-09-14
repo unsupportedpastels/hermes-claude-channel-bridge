@@ -5,14 +5,16 @@ import os
 import threading
 import uuid
 from collections.abc import MutableMapping
+from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+import yaml
 from openai import OpenAI
 from providers import register_provider
 from providers.base import ProviderProfile
 
-from .api_config import TOKEN_ENV, active_home, api_base_url
+from .api_config import TOKEN_ENV, active_home, api_base_url, api_storage
 from .models import MODELS, reasoning_efforts
 
 OWNER_HEADER = "X-Hermes-Bridge-Client"
@@ -113,6 +115,60 @@ class BridgeOpenAI(OpenAI):
         super().close()
 
 
+CONSENT_KEY = "development_channels_accepted"
+
+
+def _consent_recorded(home):
+    """True when config.yaml already records development-channel consent."""
+    config = Path(home) / "config.yaml"
+    try:
+        data = yaml.safe_load(config.read_text(encoding="utf-8")) if config.exists() else {}
+    except (OSError, UnicodeError, yaml.YAMLError):
+        return False
+    section = (data or {}).get("claude_native_bridge")
+    return isinstance(section, dict) and section.get(CONSENT_KEY) is True
+
+
+def _first_run(home, token):
+    """Return a usable ``(token, base_url)`` or fail with a setup pointer.
+
+    Hermes' plugin installer never runs npm or plugin setup, so a freshly
+    installed plugin can be selected before it is usable. When config.yaml
+    already records development-channel consent, the missing steps run here
+    on first use; otherwise the explicit setup command is required, because
+    that consent must come from a person.
+    """
+    from . import channel_install
+
+    ready = channel_install.channel_dependencies_ready()
+    if token and ready:
+        return token, None
+    if not _consent_recorded(home):
+        problem = (
+            "channel dependencies are not installed"
+            if token
+            else "has no local API credential"
+        )
+        raise ValueError(
+            "Claude Native Bridge "
+            + problem
+            + "; run "
+            + channel_install.SETUP_COMMAND
+            + " and restart Hermes, or set claude_native_bridge."
+            + CONSENT_KEY
+            + ": true in config.yaml to let the first use run setup"
+        )
+    if not ready:
+        channel_install.install_channel_dependencies()
+    if token:
+        return token, None
+    from .api_service import setup
+
+    info = setup(home, accept_development_channels=True)
+    keyfile = api_storage(home) / "token"
+    return keyfile.read_text(encoding="utf-8").strip(), info["base_url"]
+
+
 class ClaudeAPIProfile(ProviderProfile):
     def create_client(self, **kwargs):
         from .api_service import ensure_server
@@ -136,6 +192,12 @@ class ClaudeAPIProfile(ProviderProfile):
         if home is None:
             home = active_home()
         token = kwargs.get("api_key") or os.environ.get(TOKEN_ENV, "")
+        token, configured_url = _first_run(home, token)
+        if configured_url:
+            # First-use setup chose the port; the profile's import-time URL
+            # predates it.
+            base_url = configured_url
+            parsed = urlsplit(base_url)
         ensure_server(home, token, port=parsed.port or 80)
         supported = set(inspect.signature(OpenAI).parameters)
         arguments = {key: value for key, value in kwargs.items() if key in supported}

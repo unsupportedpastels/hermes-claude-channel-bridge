@@ -1,19 +1,50 @@
-"""Plugin-owned setup and local API lifecycle commands."""
+"""Plugin-owned setup and local API lifecycle commands.
+
+Installed as the ``hermes-claude-bridge`` console script and runnable as
+``python -m claude_native_bridge``. Hermes' plugin installer registers the
+manifest but never runs npm or plugin setup, so ``setup`` owns both.
+"""
 
 import argparse
 import json
 import os
 from pathlib import Path
 
+PROG = "hermes-claude-bridge"
+
+
+def _ensure_channel_dependencies(*, skip_install: bool) -> dict:
+    from .channel_install import (
+        channel_dependencies_ready,
+        install_channel_dependencies,
+        install_command,
+    )
+
+    if channel_dependencies_ready():
+        return {"ready": True, "installed": False}
+    if skip_install:
+        raise SystemExit(
+            "Channel dependencies are missing; run "
+            + " ".join(install_command())
+            + " or rerun setup without --skip-channel-install"
+        )
+    install_channel_dependencies()
+    return {"ready": True, "installed": True}
+
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="python -m claude_native_bridge")
+    parser = argparse.ArgumentParser(prog=PROG)
     commands = parser.add_subparsers(dest="action", required=True)
     for action in ("setup", "start", "status", "stop", "doctor"):
         command = commands.add_parser(action)
         command.add_argument("--home", type=Path)
         if action == "setup":
             command.add_argument("--accept-development-channels", action="store_true")
+            command.add_argument(
+                "--skip-channel-install",
+                action="store_true",
+                help="fail instead of running the locked npm ci when channel dependencies are missing",
+            )
         elif action == "doctor":
             command.add_argument(
                 "--check-cli-version",
@@ -34,13 +65,17 @@ def main(argv=None):
         return 0 if result["ready"] else 1
 
     # Lifecycle modules are deliberately not imported by the offline doctor.
-    from .api_config import api_storage, configured_port, api_base_url
-    from .api_service import ensure_server, setup, stop_server, _health
+    from .api_config import api_base_url, api_storage, configured_port
+    from .api_service import _health, ensure_server, setup, stop_server
 
     if args.action == "setup":
+        channel = _ensure_channel_dependencies(
+            skip_install=args.skip_channel_install
+        )
         result = setup(
             home, accept_development_channels=args.accept_development_channels
         )
+        result["channel_dependencies"] = channel
     elif args.action == "stop":
         result = stop_server(home)
     else:

@@ -3,3 +3,18 @@ kind: model-provider
 version: 0.2.0
 description: Plugin-only OpenAI-compatible API backed by native Claude Code.
 license: MIT
+# Hermes surfaces these at install time and in setup views; it does not run them.
+# `hermes-claude-bridge setup` installs the locked channel dependencies itself.
+external_dependencies:
+  - name: node
+    install: "Install Node.js 22 (https://nodejs.org/) with npm on PATH"
+    check: "node --version"
+  - name: claude
+    install: "npm install -g @anthropic-ai/claude-code && claude auth login"
+    check: "claude --version"
+  - name: tmux
+    install: "Linux: apt-get install tmux; macOS: brew install tmux; not used on Windows"
+    check: "tmux -V"
+  - name: channel-dependencies
+    install: "hermes-claude-bridge setup --accept-development-channels"
+    check: "hermes-claude-bridge doctor"
