@@ -8,7 +8,9 @@ manual consent and MCP task data, but does not expose the separate console's
 screen/input to this parent. This backend retains ConPTY specifically for the
 existing automatic capture/send_key consent contract and background operation;
 it is not required for MCP itself. Git Bash adds no needed launch capability.
-Neither launch route has been verified on a Windows target yet.
+This backend has a prior Windows 11 native baseline. The current release
+candidate still requires a fresh Windows target retest; offline tests alone do
+not renew that baseline.
 
 The runtime must already be
 protected by secure_runtime_directory(), before any config/secrets are written.

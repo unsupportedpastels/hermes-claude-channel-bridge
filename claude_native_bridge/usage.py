@@ -2,10 +2,10 @@
 
 import json
 import os
-from pathlib import Path
 import sys
 import tempfile
 import time
+from pathlib import Path
 from types import SimpleNamespace as NS
 
 TOKEN_FIELDS = (
@@ -14,12 +14,70 @@ TOKEN_FIELDS = (
     "cache_creation_input_tokens",
     "cache_read_input_tokens",
 )
+PROVENANCE_SOURCE = "native_status_line"
+
+
+def _unknown_counters():
+    return {field: None for field in TOKEN_FIELDS}
+
+
+def _status_snapshot(runtime):
+    if runtime is None:
+        return None
+    try:
+        snapshot = json.loads((Path(runtime) / "native-usage.json").read_text())
+    except (OSError, ValueError, TypeError):
+        return None
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+def completion_usage_provenance(selected_model, usage, runtime=None, session_id=None):
+    """Describe request attribution without claiming billing or exposing payload data."""
+    observed = None
+    snapshot = _status_snapshot(runtime)
+    if snapshot is not None:
+        model = snapshot.get("model")
+        if isinstance(model, dict) and isinstance(model.get("id"), str):
+            observed = model["id"]
+
+    counters = _unknown_counters()
+    correlation = "missing" if snapshot is None else "ambiguous"
+    if snapshot is not None and (
+        (observed is not None and observed != selected_model)
+        or (
+            session_id is not None
+            and snapshot.get("session_id") != session_id
+        )
+    ):
+        correlation = "mismatch"
+    elif usage is not None and snapshot is not None:
+        context_window = snapshot.get("context_window")
+        raw = (
+            context_window.get("current_usage")
+            if isinstance(context_window, dict)
+            else None
+        )
+        if isinstance(raw, dict) and all(
+            type(raw.get(field)) is int and raw[field] >= 0
+            for field in TOKEN_FIELDS
+        ):
+            counters = {field: raw[field] for field in TOKEN_FIELDS}
+            correlation = "correlated"
+
+    return {
+        "source": PROVENANCE_SOURCE,
+        "correlation_status": correlation,
+        "selected_model": selected_model,
+        "observed_model": observed,
+        "raw_counters": counters,
+    }
 
 
 def usage_for_request(snapshot, session_id, model, previous_requests):
     if not isinstance(snapshot, dict) or snapshot.get("session_id") != session_id:
         return None
-    if (snapshot.get("model") or {}).get("id") != model:
+    observed_model = snapshot.get("model")
+    if not isinstance(observed_model, dict) or observed_model.get("id") != model:
         return None
     count = (snapshot.get("prompt_cache") or {}).get("requests")
     if (
@@ -49,6 +107,32 @@ def usage_for_request(snapshot, session_id, model, previous_requests):
     )
 
 
+def context_occupancy(snapshot, session_id, model):
+    """Native context consumed after the last API call, or None without evidence.
+
+    Tokens come from Claude's own status-line counters, never a local estimate.
+    ``window`` is the reported context_window_size or None when absent.
+    """
+    if not isinstance(snapshot, dict) or snapshot.get("session_id") != session_id:
+        return None
+    observed_model = snapshot.get("model")
+    if not isinstance(observed_model, dict) or observed_model.get("id") != model:
+        return None
+    context_window = snapshot.get("context_window")
+    if not isinstance(context_window, dict):
+        return None
+    usage = context_window.get("current_usage")
+    if not isinstance(usage, dict) or any(
+        type(usage.get(k)) is not int or usage[k] < 0 for k in TOKEN_FIELDS
+    ):
+        return None
+    size = context_window.get("context_window_size")
+    return {
+        "tokens": sum(usage[field] for field in TOKEN_FIELDS),
+        "window": size if type(size) is int and size > 0 else None,
+    }
+
+
 def capture_status(runtime, payload):
     root = Path(runtime)
     try:
@@ -63,7 +147,10 @@ def capture_status(runtime, payload):
             "context_window": {
                 "current_usage": (payload.get("context_window") or {}).get(
                     "current_usage"
-                )
+                ),
+                "context_window_size": (payload.get("context_window") or {}).get(
+                    "context_window_size"
+                ),
             },
             "prompt_cache": {
                 "requests": (payload.get("prompt_cache") or {}).get("requests")

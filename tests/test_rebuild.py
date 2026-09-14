@@ -110,7 +110,8 @@ def test_native_exchange_types_dead_process_but_not_live_transport_error(
             "medium",
             http_client=object(),
         )
-        session.runtime = tmp_path
+        session.runtime = tmp_path / ("alive" if process_alive else "dead")
+        session.runtime.mkdir()
         session.port = 1234
         session.token = "fixture"
 

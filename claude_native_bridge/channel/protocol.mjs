@@ -1,10 +1,19 @@
 import {EventEmitter} from 'node:events';
 
 export const MAX_BYTES = 8 * 1024 * 1024;
+// Proposal-only limits match claude_native_bridge/protocol.py. Depth is
+// root-zero; nodes include containers and scalar values, but not object keys.
+// Canonical request history stays outside this narrow proposal budget and is
+// bounded/paged by the separate 8 MiB transport machinery.
+export const TOOL_PROPOSAL_MAX_BYTES = 256 * 1024;
+export const JSON_MAX_DEPTH = 32;
+export const JSON_MAX_NODES = 10_000;
 export const MAX_REQUESTS = 10_000;
 export const MAX_ID_LENGTH = 256;
 export const LONG_POLL_MS = 10_000;
 export const MAX_WAITERS = 32;
+export const MAX_WAKE_GENERATION = 65_536;
+export const WAKE_EVENTS = new Set(['MessageDisplay', 'Stop', 'StopFailure', 'Usage']);
 
 export class BridgeError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -13,6 +22,71 @@ const object = value => value !== null && typeof value === 'object' && !Array.is
 const exact = (value, keys) => object(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 const identifier = value => typeof value === 'string' && value.length > 0 && value.length <= MAX_ID_LENGTH;
 const invalid = message => { throw new BridgeError(400, message); };
+function* ownKeys(value) {
+  for (const key in value) if (Object.hasOwn(value, key)) yield key;
+}
+
+function jsonText(value, {maxDepth = null, maxNodes = null, maxBytes = null} = {}) {
+  const active = new Set();
+  const stack = [{operation: 'value', value, depth: 0, index: 0}];
+  let nodes = 0;
+  let encodedBytes = 0;
+  while (stack.length) {
+    const current = stack.pop();
+    if (current.operation === 'leave') {
+      active.delete(current.value);
+      continue;
+    }
+    if (current.operation === 'items') {
+      const next = current.iterator.next();
+      if (next.done) continue;
+      stack.push({...current, index: current.index + 1});
+      let child = next.value;
+      if (current.container !== null) {
+        const key = child;
+        child = current.container[key];
+        if (maxBytes !== null) {
+          encodedBytes += (current.index ? 1 : 0) + 1 + Buffer.byteLength(JSON.stringify(key), 'utf8');
+        }
+      } else if (maxBytes !== null && current.index) encodedBytes += 1;
+      stack.push({operation: 'value', value: child, depth: current.depth, index: 0});
+      if (maxBytes !== null && encodedBytes > maxBytes) throw new BridgeError(413, 'Tool proposal JSON is too large');
+      continue;
+    }
+    nodes += 1;
+    if (maxNodes !== null && nodes > maxNodes) invalid('JSON data exceeds the tool proposal node budget');
+    if (maxDepth !== null && current.depth > maxDepth) invalid('JSON data exceeds the tool proposal depth budget');
+    const item = current.value;
+    if (item !== null && typeof item === 'object') {
+      if (!Array.isArray(item) && Object.getPrototypeOf(item) !== Object.prototype && Object.getPrototypeOf(item) !== null) {
+        invalid('Invalid JSON data');
+      }
+      if (active.has(item)) invalid('Invalid JSON data: container cycle detected');
+      active.add(item);
+      stack.push({operation: 'leave', value: item, depth: current.depth, index: 0});
+      if (maxBytes !== null) encodedBytes += 2;
+      stack.push({
+        operation: 'items',
+        iterator: Array.isArray(item) ? item.values() : ownKeys(item),
+        container: Array.isArray(item) ? null : item,
+        depth: current.depth + 1,
+        index: 0,
+      });
+    } else if (!['string', 'boolean', 'number'].includes(typeof item) && item !== null) {
+      invalid('Invalid JSON data');
+    } else if (typeof item === 'number' && !Number.isFinite(item)) {
+      invalid('Invalid JSON data: non-finite number');
+    } else if (maxBytes !== null) {
+      encodedBytes += Buffer.byteLength(JSON.stringify(item), 'utf8');
+    }
+    if (maxBytes !== null && encodedBytes > maxBytes) throw new BridgeError(413, 'Tool proposal JSON is too large');
+  }
+  let encoded;
+  try { encoded = JSON.stringify(value); }
+  catch { invalid('Invalid JSON data'); }
+  if (typeof encoded !== 'string') invalid('Invalid JSON data');
+  return encoded;
+}
 
 export function validateAdvance(body) {
   if (!exact(body, ['ack', 'request']) || !(body.ack === null || (Number.isSafeInteger(body.ack) && body.ack >= 0)) ||
@@ -25,13 +99,14 @@ export function validateDecision(value) {
   if (!object(value) || !identifier(value.request_id)) invalid('Invalid decision shape');
   if (value.kind === 'final') {
     if (!exact(value, ['request_id', 'kind', 'text']) || typeof value.text !== 'string') invalid('Invalid final shape');
+    if (Buffer.byteLength(jsonText(value), 'utf8') > MAX_BYTES) throw new BridgeError(413, 'Decision too large');
   } else if (value.kind === 'tool_calls') {
+    jsonText(value, {maxDepth: JSON_MAX_DEPTH, maxNodes: JSON_MAX_NODES, maxBytes: TOOL_PROPOSAL_MAX_BYTES});
     if (!exact(value, ['request_id', 'kind', 'tool_calls']) || !Array.isArray(value.tool_calls) || value.tool_calls.length < 1 || value.tool_calls.length > 16 ||
         !value.tool_calls.every(call => exact(call, ['name', 'arguments']) && identifier(call.name) && object(call.arguments))) {
       invalid('Invalid tool_calls shape');
     }
   } else invalid('Invalid decision kind');
-  if (Buffer.byteLength(JSON.stringify(value)) > MAX_BYTES) throw new BridgeError(413, 'Decision too large');
 }
 
 export const RESPOND_SCHEMA = {
@@ -59,10 +134,29 @@ export class Bridge extends EventEmitter {
   latest = null;
   failed = null;
   seen = new Set();
+  wakeGeneration = 0;
+  wakePrompt = null;
+  latestWake = null;
 
   constructor() { super(); this.setMaxListeners(MAX_WAITERS + 1); }
   status() { return {sequence: this.sequence, current: this.current?.request_id ?? null, held: this.held?.sequence ?? null, failed: this.failed}; }
   assertHealthy() { if (this.failed) throw new BridgeError(503, this.failed); }
+
+  notifyWake(value) {
+    this.assertHealthy();
+    if (!exact(value, ['request_id', 'prompt_id', 'event', 'generation']) ||
+        !identifier(value.request_id) || !identifier(value.prompt_id) || !WAKE_EVENTS.has(value.event) ||
+        !Number.isSafeInteger(value.generation) || value.generation < 1 || value.generation > MAX_WAKE_GENERATION) {
+      invalid('Invalid wake shape');
+    }
+    if (!this.current || value.request_id !== this.current.request_id) invalid('Uncorrelated wake request');
+    if (this.wakePrompt !== null && value.prompt_id !== this.wakePrompt) invalid('Uncorrelated wake prompt');
+    if (value.generation <= this.wakeGeneration) throw new BridgeError(409, 'Stale wake generation');
+    this.wakePrompt ??= value.prompt_id;
+    this.wakeGeneration = value.generation;
+    this.latestWake = {generation: value.generation, event: value.event};
+    this.emit('change');
+  }
 
   advance(body) {
     this.assertHealthy();
@@ -80,6 +174,9 @@ export class Bridge extends EventEmitter {
     this.held = null;
     this.latest = null;
     this.current = body.request;
+    this.wakeGeneration = 0;
+    this.wakePrompt = null;
+    this.latestWake = null;
     this.seen.add(body.request.request_id);
     if (previous) {
       previous.cleanup();
@@ -95,6 +192,7 @@ export class Bridge extends EventEmitter {
     validateDecision(decision);
     if (this.held || !this.current || decision.request_id !== this.current.request_id) throw new BridgeError(409, 'Invalid or overlapping response');
     this.current = null;
+    this.latestWake = null;
     this.latest = {sequence: ++this.sequence, ...decision};
     this.emit('change');
     return this.latest;
@@ -110,6 +208,7 @@ export class Bridge extends EventEmitter {
     }
     const response = {sequence: ++this.sequence, ...decision};
     this.current = null;
+    this.latestWake = null;
     const onAbort = () => this.fail('native_cancelled');
     const pending = new Promise((resolve, reject) => {
       this.held = {sequence: this.sequence, resolve, reject, cleanup: () => signal?.removeEventListener('abort', onAbort)};
@@ -127,6 +226,7 @@ export class Bridge extends EventEmitter {
     this.held = null;
     this.current = null;
     this.latest = null;
+    this.latestWake = null;
     if (previous) { previous.cleanup(); previous.reject(new BridgeError(503, reason)); }
     this.emit('change');
   }

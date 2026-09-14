@@ -1,6 +1,6 @@
 import http from 'node:http';
 import {timingSafeEqual} from 'node:crypto';
-import {BridgeError, LONG_POLL_MS, MAX_BYTES, MAX_WAITERS} from './protocol.mjs';
+import {BridgeError, LONG_POLL_MS, MAX_BYTES, MAX_WAITERS, MAX_WAKE_GENERATION} from './protocol.mjs';
 
 const BODY_TIMEOUT_MS = 15_000;
 const json = (res, status, data) => {
@@ -47,7 +47,7 @@ export function createHttpServer({bridge, token, advance, log = () => {}}) {
         return;
       }
       const url = new URL(req.url, 'http://127.0.0.1');
-      const method = {'/advance': 'POST', '/text-complete': 'POST', '/status': 'GET', '/response': 'GET'}[url.pathname];
+      const method = {'/advance': 'POST', '/text-complete': 'POST', '/wake': 'POST', '/status': 'GET', '/response': 'GET'}[url.pathname];
       if (!method) throw new BridgeError(404, 'Not found');
       if (req.method !== method) { res.setHeader('Allow', method); throw new BridgeError(405, 'Method not allowed'); }
       if (method === 'GET' && (req.headers['transfer-encoding'] || Number(req.headers['content-length'] ?? 0) !== 0)) throw new BridgeError(400, 'GET body not allowed');
@@ -57,18 +57,26 @@ export function createHttpServer({bridge, token, advance, log = () => {}}) {
       } else if (url.pathname === '/response') {
         const afterText = url.searchParams.get('after');
         const waitText = url.searchParams.get('wait_ms');
+        const wakeText = url.searchParams.get('wake_after');
         const keys = [...url.searchParams.keys()];
-        if (keys.some(key => !['after', 'wait_ms'].includes(key)) || new Set(keys).size !== keys.length ||
+        if (keys.some(key => !['after', 'wait_ms', 'wake_after'].includes(key)) || new Set(keys).size !== keys.length ||
             !/^(0|[1-9][0-9]*)$/.test(afterText ?? '') || !Number.isSafeInteger(Number(afterText)) || Number(afterText) > bridge.sequence) {
           throw new BridgeError(400, 'Invalid response cursor');
         }
         if (waitText !== null && (!/^(0|[1-9][0-9]*)$/.test(waitText) || !Number.isSafeInteger(Number(waitText)) || Number(waitText) > LONG_POLL_MS)) {
           throw new BridgeError(400, 'Invalid wait_ms');
         }
+        if (wakeText !== null && (!/^(0|[1-9][0-9]*)$/.test(wakeText) || !Number.isSafeInteger(Number(wakeText)) || Number(wakeText) > MAX_WAKE_GENERATION)) {
+          throw new BridgeError(400, 'Invalid wake cursor');
+        }
         const waitMs = waitText === null ? LONG_POLL_MS : Number(waitText);
         bridge.assertHealthy();
         const after = Number(afterText);
         if (bridge.latest && bridge.latest.sequence > after) { json(res, 200, {response: bridge.latest}); return; }
+        const wakeAfter = wakeText === null ? null : Number(wakeText);
+        if (wakeAfter !== null && bridge.latestWake && bridge.latestWake.generation > wakeAfter) {
+          json(res, 200, {response: null, wake: bridge.latestWake}); return;
+        }
         if (waitMs === 0) { json(res, 200, {response: null}); return; }
         if (waiters >= MAX_WAITERS) throw new BridgeError(429, 'Too many response waiters');
         // Subscription setup is synchronous: no response can land between check and registration.
@@ -84,6 +92,7 @@ export function createHttpServer({bridge, token, advance, log = () => {}}) {
         const onChange = () => {
           if (bridge.failed) finish(503, {error: bridge.failed});
           else if (bridge.latest && bridge.latest.sequence > after) finish(200, {response: bridge.latest});
+          else if (wakeAfter !== null && bridge.latestWake && bridge.latestWake.generation > wakeAfter) finish(200, {response: null, wake: bridge.latestWake});
         };
         const timer = setTimeout(() => finish(200, {response: null}), waitMs);
         bridge.on('change', onChange); res.once('close', onClose);
@@ -97,6 +106,11 @@ export function createHttpServer({bridge, token, advance, log = () => {}}) {
         try { body = await readBody(req); } finally { readers--; }
         if (url.pathname === '/text-complete') {
           json(res, 200, {response: bridge.completeText(body)});
+          return;
+        }
+        if (url.pathname === '/wake') {
+          bridge.notifyWake(body);
+          json(res, 200, {accepted: true});
           return;
         }
         await advance(body);

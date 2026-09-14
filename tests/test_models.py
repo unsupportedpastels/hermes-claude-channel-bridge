@@ -1,16 +1,17 @@
 """Catalog and picker compatibility through an actual local HTTP fixture."""
 
 import os
-from pathlib import Path
+import shutil
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 
 def test_profile_catalog_uses_real_http_auth_and_shared_models():
-    from claude_native_bridge.models import MODELS, MODEL_LABELS
-    from claude_native_bridge.provider import profile
     from claude_native_bridge.api_config import TOKEN_ENV
+    from claude_native_bridge.models import MODEL_LABELS, MODELS
+    from claude_native_bridge.provider import profile
 
     assert MODELS and tuple(MODEL_LABELS) == MODELS
     assert all(label and label != model for model, label in MODEL_LABELS.items())
@@ -22,7 +23,8 @@ def test_profile_catalog_uses_real_http_auth_and_shared_models():
 
 def test_runtime_accepts_the_same_catalog_the_picker_advertises():
     from claude_native_bridge.models import MODELS
-    from claude_native_bridge.native import MODELS as RUNTIME_MODELS, native_argv
+    from claude_native_bridge.native import MODELS as RUNTIME_MODELS
+    from claude_native_bridge.native import native_argv
 
     assert RUNTIME_MODELS == MODELS
     for model in MODELS:
@@ -36,12 +38,27 @@ def test_unmodified_host_http_picker_and_session_selection(tmp_path):
     import hermes_cli.inventory
 
     root = Path(__file__).resolve().parents[1]
-    plugins = tmp_path / "plugins"
-    plugins.mkdir()
-    (plugins / "claude-native-bridge").symlink_to(root, target_is_directory=True)
+    providers = tmp_path / "plugins" / "model-providers"
+    providers.mkdir(parents=True)
+    shutil.copytree(
+        root,
+        providers / "claude-native-bridge",
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".private",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".venv",
+            "venv",
+            "node_modules",
+            "__pycache__",
+            "*.pyc",
+        ),
+    )
     code = textwrap.dedent("""
-        import http.server,json,os,sys,threading
+        import http.server,json,os,platform,sys,threading
         from pathlib import Path
+        platform.system()  # Prime Windows platform metadata before process audit.
         TOKEN='fixture-local-api-token-000000000000000000'
         MODELS=['claude-sonnet-5','claude-opus-4-8','claude-opus-5','claude-haiku-4-5-20251001','claude-fable-5-1']
         requests=[]
@@ -96,17 +113,28 @@ def test_unmodified_host_http_picker_and_session_selection(tmp_path):
     core_root = Path(hermes_cli.inventory.__file__).resolve().parents[1]
     env = {
         "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": os.pathsep.join(entry for entry in sys.path if entry),
         "HOME": str(tmp_path),
         "HERMES_HOME": str(tmp_path),
         "LANG": "C.UTF-8",
         "TZ": "UTC",
     }
+    env.update(
+        {
+            name: os.environ[name]
+            for name in ("SYSTEMROOT", "WINDIR")
+            if name in os.environ
+        }
+    )
+    host_python = core_root / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    python_executable = host_python if host_python.is_file() else Path(sys.executable)
     result = subprocess.run(
-        [sys.executable, "-c", code],
+        [str(python_executable), "-c", code],
         cwd=core_root,
         env=env,
         text=True,
         capture_output=True,
         timeout=45,
+        check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr

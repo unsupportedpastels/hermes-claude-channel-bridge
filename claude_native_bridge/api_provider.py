@@ -2,9 +2,11 @@
 
 import inspect
 import os
+import threading
+import uuid
+from collections.abc import MutableMapping
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
-import uuid
 
 from openai import OpenAI
 from providers import register_provider
@@ -13,16 +15,78 @@ from providers.base import ProviderProfile
 from .api_config import TOKEN_ENV, active_home, api_base_url
 from .models import MODELS, reasoning_efforts
 
+OWNER_HEADER = "X-Hermes-Bridge-Client"
+RETRY_LINEAGE_HEADER = "X-Hermes-Bridge-Retry-Lineage"
+LEASES_HEADER = "X-Hermes-Bridge-Leases"
+_UNBOUND_RETRY_LINEAGE = "unbound"
+_lease_lock = threading.Lock()
+_lineage_leases: dict[str, set[str]] = {}
+
+
+def _retry_lineage(headers):
+    """Bind a lineage to Hermes' durable parent client-kwargs header mapping."""
+    lineage = headers.get(RETRY_LINEAGE_HEADER) if headers is not None else None
+    try:
+        lineage = str(uuid.UUID(lineage))
+    except (AttributeError, TypeError, ValueError):
+        lineage = str(uuid.uuid4())
+        if isinstance(headers, MutableMapping):
+            headers[RETRY_LINEAGE_HEADER] = lineage
+    return lineage
+
+
+def _register_lease(lineage, lease):
+    with _lease_lock:
+        _lineage_leases.setdefault(lineage, set()).add(lease)
+
+
+def _unregister_lease(lineage, lease):
+    with _lease_lock:
+        leases = _lineage_leases.get(lineage)
+        if leases is None:
+            return
+        leases.discard(lease)
+        if not leases:
+            _lineage_leases.pop(lineage, None)
+
+
+def _active_leases(lineage):
+    with _lease_lock:
+        return tuple(sorted(_lineage_leases.get(lineage, ())))
+
 
 class BridgeOpenAI(OpenAI):
     """OpenAI client that releases its plugin-owned native owner on close."""
 
-    def __init__(self, *args, bridge_close_url, bridge_token, bridge_owner, **kwargs):
+    def __init__(
+        self,
+        *args,
+        bridge_close_url,
+        bridge_token,
+        bridge_owner,
+        bridge_lineage=None,
+        **kwargs,
+    ):
         self._bridge_close_url = bridge_close_url
         self._bridge_token = bridge_token
         self._bridge_owner = bridge_owner
+        self._bridge_lineage = bridge_lineage or str(uuid.uuid4())
         self._bridge_owner_closed = False
-        super().__init__(*args, **kwargs)
+        _register_lease(self._bridge_lineage, bridge_owner)
+        try:
+            super().__init__(*args, **kwargs)
+        except BaseException:
+            _unregister_lease(self._bridge_lineage, bridge_owner)
+            raise
+
+    @property
+    def default_headers(self):
+        # The SDK evaluates this property for every request. Publishing all
+        # sibling leases lets the service retain a logical owner before an
+        # otherwise-idle shared primary client makes its summary request.
+        headers = dict(super().default_headers)
+        headers[LEASES_HEADER] = ",".join(_active_leases(self._bridge_lineage))
+        return headers
 
     def close(self):
         if not self._bridge_owner_closed:
@@ -33,7 +97,8 @@ class BridgeOpenAI(OpenAI):
                 method="POST",
                 headers={
                     "Authorization": "Bearer " + self._bridge_token,
-                    "X-Hermes-Bridge-Client": self._bridge_owner,
+                    OWNER_HEADER: self._bridge_owner,
+                    RETRY_LINEAGE_HEADER: self._bridge_lineage,
                 },
             )
             try:
@@ -43,6 +108,8 @@ class BridgeOpenAI(OpenAI):
                 # Closing the local SDK client must remain safe during process
                 # shutdown or when the bridge server has already exited.
                 pass
+            finally:
+                _unregister_lease(self._bridge_lineage, self._bridge_owner)
         super().close()
 
 
@@ -72,15 +139,18 @@ class ClaudeAPIProfile(ProviderProfile):
         ensure_server(home, token, port=parsed.port or 80)
         supported = set(inspect.signature(OpenAI).parameters)
         arguments = {key: value for key, value in kwargs.items() if key in supported}
-        headers = dict(arguments.get("default_headers") or {})
+        inherited_headers = arguments.get("default_headers")
+        headers = dict(inherited_headers or {})
+        headers[RETRY_LINEAGE_HEADER] = _retry_lineage(inherited_headers)
         owner = str(uuid.uuid4())
-        headers["X-Hermes-Bridge-Client"] = owner
+        headers[OWNER_HEADER] = owner
         arguments.update(api_key=token, base_url=base_url, default_headers=headers)
         return BridgeOpenAI(
             **arguments,
             bridge_close_url=base_url.rstrip("/") + "/owner/close",
             bridge_token=token,
             bridge_owner=owner,
+            bridge_lineage=headers[RETRY_LINEAGE_HEADER],
         )
 
     def build_extra_body(self, *, session_id=None, **context):
@@ -103,6 +173,10 @@ def make_profile(home=None):
         api_mode="chat_completions",
         env_vars=(TOKEN_ENV,),
         base_url=api_base_url(home or active_home()),
+        # Hermes copies this mapping into each AIAgent's stored client kwargs.
+        # create_client replaces the marker in that per-agent mapping, so later
+        # request-client rebuilds inherit it while independent agents do not.
+        default_headers={RETRY_LINEAGE_HEADER: _UNBOUND_RETRY_LINEAGE},
         fallback_models=MODELS,
         supports_vision=False,
         supports_vision_tool_messages=False,

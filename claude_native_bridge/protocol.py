@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -28,31 +29,111 @@ class UnsupportedContent(ProtocolError):
     """Content cannot be represented faithfully by this text-only bridge."""
 
 
-def _json(value: Any, *, sort_keys: bool = False) -> str:
-    """Encode strict JSON, rejecting silent conversions of non-JSON objects."""
+# These proposal-only limits are identical to channel/protocol.mjs. Depth is
+# root-zero and nodes count each container and scalar value, but not object keys.
+# Canonical history remains outside this deliberately narrow model-proposal
+# budget and is bounded/paged by the separate transport machinery.
+TOOL_PROPOSAL_MAX_BYTES = 256 * 1024
+JSON_MAX_DEPTH = 32
+JSON_MAX_NODES = 10_000
 
-    def check(item: Any) -> None:
-        if isinstance(item, dict):
-            if any(not isinstance(key, str) for key in item):
-                raise ProtocolError("JSON object keys must be strings")
-            for nested in item.values():
-                check(nested)
-        elif isinstance(item, list):
-            for nested in item:
-                check(nested)
+
+def _check_json(
+    value: Any,
+    *,
+    max_depth: int | None = None,
+    max_nodes: int | None = None,
+    max_bytes: int | None = None,
+) -> None:
+    """Iteratively reject invalid JSON, cycles, and optional tree budgets."""
+
+    active: set[int] = set()
+    stack: list[tuple[str, Any, int, int]] = [("value", value, 0, 0)]
+    nodes = 0
+    encoded_bytes = 0
+    while stack:
+        operation, item, depth, index = stack.pop()
+        if operation == "leave":
+            active.remove(id(item))
+            continue
+        if operation in ("dict_items", "list_items"):
+            try:
+                child = next(item)
+            except StopIteration:
+                continue
+            stack.append((operation, item, depth, index + 1))
+            if operation == "dict_items":
+                key, child = child
+                if not isinstance(key, str):
+                    raise ProtocolError("JSON object keys must be strings")
+                if max_bytes is not None:
+                    encoded_bytes += (1 if index else 0) + 1
+                    encoded_bytes += len(
+                        json.dumps(key, ensure_ascii=False).encode("utf-8")
+                    )
+            elif max_bytes is not None and index:
+                encoded_bytes += 1
+            stack.append(("value", child, depth, 0))
+            if max_bytes is not None and encoded_bytes > max_bytes:
+                raise ProtocolError("Tool proposal JSON is too large")
+            continue
+        nodes += 1
+        if max_nodes is not None and nodes > max_nodes:
+            raise ProtocolError("JSON data exceeds the tool proposal node budget")
+        if max_depth is not None and depth > max_depth:
+            raise ProtocolError("JSON data exceeds the tool proposal depth budget")
+        if isinstance(item, (dict, list)):
+            identity = id(item)
+            if identity in active:
+                raise ProtocolError("Invalid JSON data: container cycle detected")
+            active.add(identity)
+            stack.append(("leave", item, depth, 0))
+            if max_bytes is not None:
+                encoded_bytes += 2
+            if isinstance(item, dict):
+                stack.append(("dict_items", iter(item.items()), depth + 1, 0))
+            else:
+                stack.append(("list_items", iter(item), depth + 1, 0))
+        elif isinstance(item, float) and not math.isfinite(item):
+            raise ProtocolError("Invalid JSON data: non-finite number")
         elif item is not None and not isinstance(item, (str, bool, int, float)):
             raise ProtocolError("Only JSON-compatible values are supported")
+        elif max_bytes is not None:
+            encoded_bytes += len(
+                json.dumps(item, ensure_ascii=False, allow_nan=False).encode("utf-8")
+            )
+        if max_bytes is not None and encoded_bytes > max_bytes:
+            raise ProtocolError("Tool proposal JSON is too large")
+
+
+def _json(
+    value: Any,
+    *,
+    sort_keys: bool = False,
+    max_depth: int | None = None,
+    max_nodes: int | None = None,
+    max_bytes: int | None = None,
+) -> str:
+    """Encode strict JSON, optionally enforcing pre-recursion resource budgets."""
 
     try:
-        check(value)
-        return json.dumps(
+        _check_json(
+            value,
+            max_depth=max_depth,
+            max_nodes=max_nodes,
+            max_bytes=max_bytes,
+        )
+        encoded = json.dumps(
             value,
             ensure_ascii=False,
             allow_nan=False,
             separators=(",", ":"),
             sort_keys=sort_keys,
         )
-    except (TypeError, ValueError, RecursionError) as exc:
+        return encoded
+    except ProtocolError:
+        raise
+    except (TypeError, ValueError, RecursionError, UnicodeError) as exc:
         raise ProtocolError("Invalid JSON data") from exc
 
 
@@ -310,17 +391,20 @@ def _validate_arguments(arguments: dict, schema: dict | bool) -> None:
         )
 
     def local_references(value: Any) -> None:
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if key in ("$ref", "$dynamicRef", "$recursiveRef"):
-                    if not isinstance(item, str) or not item.startswith("#"):
+        pending = [value]
+        while pending:
+            current = pending.pop()
+            if isinstance(current, dict):
+                for key, item in current.items():
+                    if key in ("$ref", "$dynamicRef", "$recursiveRef") and (
+                        not isinstance(item, str) or not item.startswith("#")
+                    ):
                         raise ProtocolError(
                             "Only local JSON Schema references are supported"
                         )
-                local_references(item)
-        elif isinstance(value, list):
-            for item in value:
-                local_references(item)
+                    pending.append(item)
+            elif isinstance(current, list):
+                pending.extend(current)
 
     local_references(schema)
     try:
@@ -361,7 +445,15 @@ def build_completion(
         raise ProtocolError("Decision request_id does not exactly match the request")
     if not isinstance(model, str) or not model:
         raise ProtocolError("model must be a nonempty string")
-    _json(decision)
+    if decision.get("kind") == "tool_calls":
+        _json(
+            decision,
+            max_depth=JSON_MAX_DEPTH,
+            max_nodes=JSON_MAX_NODES,
+            max_bytes=TOOL_PROPOSAL_MAX_BYTES,
+        )
+    else:
+        _json(decision)
     fields = set(decision)
     if "sequence" in fields:
         sequence = decision["sequence"]

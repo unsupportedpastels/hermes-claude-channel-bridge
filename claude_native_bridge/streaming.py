@@ -7,11 +7,20 @@ MAX_BATCHES = 16384
 
 
 class TextBatches:
-    def __init__(self, session_id, request_id, on_text=None, previous_messages=()):
+    def __init__(
+        self,
+        session_id,
+        request_id,
+        on_text=None,
+        previous_messages=(),
+        *,
+        expected_prompt_id=None,
+    ):
         self.session_id = session_id
         self.request_id = request_id
         self.on_text = on_text
         self.previous_messages = previous_messages
+        self.prompt_id = expected_prompt_id
         self.turn_id = None
         self.messages = {}
         self.parts = []
@@ -26,6 +35,7 @@ class TextBatches:
             or record.get("request_id") != self.request_id
         ):
             raise ValueError("Uncorrelated native text batch")
+        prompt = record.get("prompt_id")
         turn, message = record.get("turn_id"), record.get("message_id")
         index, final, delta = (
             record.get("index"),
@@ -33,7 +43,9 @@ class TextBatches:
             record.get("delta"),
         )
         if (
-            not isinstance(turn, str)
+            not isinstance(prompt, str)
+            or not prompt
+            or not isinstance(turn, str)
             or not turn
             or not isinstance(message, str)
             or not message
@@ -43,10 +55,13 @@ class TextBatches:
             or not isinstance(delta, str)
         ):
             raise ValueError("Invalid native text batch")
+        if self.prompt_id is not None and prompt != self.prompt_id:
+            raise ValueError("Uncorrelated native text prompt")
         if self.turn_id is not None and turn != self.turn_id:
             raise ValueError("Uncorrelated native text turn")
         if message in self.previous_messages:
             raise ValueError("Stale native text message from an earlier request")
+        self.prompt_id = prompt
         self.turn_id = turn
         batches = self.messages.setdefault(message, [])
         item = (delta, final)
@@ -72,6 +87,8 @@ class TextBatches:
             self.on_text(delta)
 
     def drain(self, runtime):
+        if (runtime / "native-attribution-error").exists():
+            raise ValueError("Native hook attribution failed")
         if (runtime / "native-text-error").exists():
             raise ValueError("Native text capture failed or exceeded its limit")
         path = runtime / "native-text.jsonl"
@@ -100,9 +117,11 @@ class TextBatches:
         if any(not values or not values[-1][1] for values in self.messages.values()):
             raise ValueError("Missing final native text batch")
         text = "".join(self.parts)
+        if final_text is not None and not self.messages:
+            # Some native clients emit only the already-correlated Stop final.
+            # Return it for the API's final remainder path; do not synthesize a batch.
+            return final_text
         # Native Stop strips terminal display whitespace; never alter emitted text.
-        if final_text is not None and (
-            not self.messages or text.rstrip() != final_text.rstrip()
-        ):
+        if final_text is not None and text.rstrip() != final_text.rstrip():
             raise ValueError("Native final text conflicts with captured batches")
         return text

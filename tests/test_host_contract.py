@@ -1,16 +1,40 @@
 """Exercise the real Hermes socket-abort path, without vendor inference."""
 
 import http.server
-from pathlib import Path
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 
-from claude_native_bridge.client import NativeBridgeClient
+from claude_native_bridge.client import NativeBridgeClient, _HostAbortSocket
 from claude_native_bridge.settings import Settings
 
 
 class HostAbortTests(unittest.TestCase):
+    def test_abort_socket_notifies_even_when_os_shutdown_does_not_unblock(self):
+        notified = threading.Event()
+
+        class NonInterruptingSocket:
+            def __init__(self):
+                self.timeouts = []
+                self.shutdowns = []
+
+            def settimeout(self, value):
+                self.timeouts.append(value)
+
+            def shutdown(self, how):
+                self.shutdowns.append(how)
+
+        raw = NonInterruptingSocket()
+        wrapped = _HostAbortSocket(raw, notified.set)
+
+        wrapped.settimeout(0)
+        wrapped.shutdown(2)
+
+        self.assertEqual(raw.timeouts, [0])
+        self.assertEqual(raw.shutdowns, [2])
+        self.assertTrue(notified.is_set())
+
     def test_hermes_socket_abort_unwinds_and_closes_native_owner(self):
         from agent.agent_runtime_helpers import force_close_tcp_sockets
 
@@ -27,7 +51,7 @@ class HostAbortTests(unittest.TestCase):
                     self.send_response(200)
                     self.end_headers()
                     self.wfile.write(b"{}")
-                except (BrokenPipeError, ConnectionResetError):
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
                     pass
 
             def log_message(self, *args):

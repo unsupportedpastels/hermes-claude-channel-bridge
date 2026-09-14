@@ -39,6 +39,19 @@ class ScriptedSession(NativeSession):
             self.advances.append(payload)
             self.polls = 0
             self.rid = payload["request"]["request_id"]
+            if self._native_prompt_id is None:
+                self.prompt_id = "p-" + self.rid
+                capture(
+                    self.runtime,
+                    {
+                        "session_id": self.session_id,
+                        "prompt_id": self.prompt_id,
+                        "hook_event_name": "UserPromptSubmit",
+                        "prompt": payload["request"]["content"],
+                    },
+                )
+            else:
+                self.prompt_id = self._native_prompt_id
             return {"accepted": True}
         if endpoint == "/text-complete":
             assert not self.closed
@@ -54,9 +67,11 @@ class ScriptedSession(NativeSession):
             return {"failed": None}
         self.polls += 1
         if self.polls == 1:
-            event = batch(delta="Hello", final=True)
+            turn_id = "t-" + self.rid
+            event = batch(delta="Hello", final=True, turn_id=turn_id)
             event.update(
                 session_id=self.session_id,
+                prompt_id=self.prompt_id,
                 request_id=self.rid,
                 message_id="m-" + self.rid,
                 hook_event_name="MessageDisplay",
@@ -76,6 +91,7 @@ class ScriptedSession(NativeSession):
                 self.runtime,
                 {
                     "session_id": self.session_id,
+                    "prompt_id": self.prompt_id,
                     "hook_event_name": "StopFailure"
                     if self.scenario == "failure"
                     else "Stop",
@@ -131,6 +147,7 @@ def test_failure_arriving_with_tool_response_is_not_success(tmp_path):
             tmp_path,
             {
                 "session_id": s.session_id,
+                "prompt_id": s.prompt_id,
                 "hook_event_name": "StopFailure",
                 "error": "rate_limit",
             },
@@ -151,13 +168,27 @@ def test_callback_exception_and_cancellation_close_native(tmp_path):
     with pytest.raises(RuntimeError):
         s.exchange("first", "r", on_text=broken)
     assert s.closed
-    s = session(tmp_path)
+    cancelled_session_id = s.session_id
+    replacement_runtime = tmp_path / "replacement-session"
+    replacement_runtime.mkdir()
+    s = session(replacement_runtime)
+    assert s.session_id != cancelled_session_id
+    assert s.runtime == replacement_runtime
     cancelled = []
     with pytest.raises(InterruptedError):
         s.exchange(
             "first", "r", on_text=cancelled.append, cancel_check=lambda: bool(cancelled)
         )
     assert s.closed
+    cancelled_session_id = s.session_id
+    post_cancel_runtime = tmp_path / "post-cancel-session"
+    post_cancel_runtime.mkdir()
+    replacement = session(post_cancel_runtime)
+    try:
+        assert replacement.session_id != cancelled_session_id
+        assert replacement.runtime == post_cancel_runtime
+    finally:
+        replacement.close()
 
 
 def test_pretool_content_commits_and_continues_history(tmp_path):
@@ -232,16 +263,18 @@ def test_capture_limit_fails_closed_and_stale_message_rejected(tmp_path, monkeyp
 
 
 def batch(index=0, delta="Hello", final=False, **kw):
-    return dict(
-        session_id="s",
-        request_id="r",
-        turn_id="t",
-        message_id="m",
-        index=index,
-        delta=delta,
-        final=final,
-        **kw,
-    )
+    values = {
+        "session_id": "s",
+        "request_id": "r",
+        "prompt_id": "p",
+        "turn_id": "t",
+        "message_id": "m",
+        "index": index,
+        "delta": delta,
+        "final": final,
+    }
+    values.update(kw)
+    return values
 
 
 def test_order_dedup_and_reconcile():
@@ -290,10 +323,15 @@ def test_conflict_missing_final_and_turn_fail():
     assert stream.finish() == "Hello"  # pre-tool text, not a Stop
 
 
-def test_plain_final_requires_batches_and_callback_errors_propagate():
-    with pytest.raises(ValueError):
-        TextBatches("s", "r").finish("unseen")
+def test_authoritative_final_without_display_batches_is_returned_as_fallback():
+    emitted = []
+    stream = TextBatches("s", "r", emitted.append)
 
+    assert stream.finish("FIRST_OK") == "FIRST_OK"
+    assert emitted == []
+
+
+def test_callback_errors_propagate():
     def broken(delta):
         raise RuntimeError("consumer closed")
 

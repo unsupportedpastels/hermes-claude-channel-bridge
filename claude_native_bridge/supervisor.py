@@ -80,10 +80,10 @@ def _kill_tmux_server(runtime):
         pass
 
 
-def _terminate_native(pid, identity):
+def _terminate_native(pid, start, identity):
     """Terminate only while PID, start time, argv, and process group still match."""
     for sig, seconds in ((signal.SIGTERM, 2), (signal.SIGKILL, 1)):
-        if _native_identity(pid) != identity:
+        if process_start(pid) != start or _native_identity(pid) != identity:
             return
         try:
             os.killpg(pid, sig)
@@ -91,9 +91,22 @@ def _terminate_native(pid, identity):
             return
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
-            if _ps_identity(pid) != identity:
+            if process_start(pid) != start or _ps_identity(pid) != identity:
                 return
             time.sleep(0.05)
+
+
+def _signal_owned_group(pid, start, sig):
+    """Signal a launched child group only while its recorded leader still owns it."""
+    if start is None or process_start(pid) != start:
+        return False
+    try:
+        if os.getpgid(pid) != pid:
+            return False
+        os.killpg(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
 
 
 def _archive_run(runtime):
@@ -117,12 +130,16 @@ def sweep_orphaned_runs(home):
         try:
             receipt = json.loads((runtime / "native-pid.json").read_text())
             pid = receipt.get("pid")
+            start = receipt.get("start")
         except (OSError, ValueError):
             pid = None
-        identity = _native_identity(pid)
+            start = None
+        identity = None
+        if isinstance(start, str) and start and process_start(pid) == start:
+            identity = _native_identity(pid)
         if identity is not None:
             _kill_tmux_server(runtime)
-            _terminate_native(pid, identity)
+            _terminate_native(pid, start, identity)
         archived.append(_archive_run(runtime))
     return archived
 
@@ -228,7 +245,10 @@ def supervise(runtime):
         process_group=0,
         preexec_fn=claim_terminal,
     )
-    (runtime / "native-pid.json").write_text(json.dumps({"pid": process.pid}))
+    child_start = process_start(process.pid)
+    (runtime / "native-pid.json").write_text(
+        json.dumps({"pid": process.pid, "start": child_start})
+    )
     stopping = False
 
     def stop(signum=None, frame=None):
@@ -251,23 +271,14 @@ def supervise(runtime):
             time.sleep(0.2)
     finally:
         # The private process group includes the native CLI and its channel child.
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        _signal_owned_group(process.pid, child_start, signal.SIGTERM)
         try:
             process.wait(timeout=3)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            _signal_owned_group(process.pid, child_start, signal.SIGKILL)
             process.wait(timeout=3)
         # Kill any grandchildren left after their leader exited.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        _signal_owned_group(process.pid, child_start, signal.SIGKILL)
     return process.returncode
 
 

@@ -86,7 +86,7 @@ class NativeLaunchTests(unittest.TestCase):
 
         self.assertTrue(
             macos_keychain_login_available(
-                {"USER": "mark", "HOME": "/Users/mark"},
+                {"USER": "testuser", "HOME": "/Users/testuser"},
                 run=run,
                 platform="darwin",
             )
@@ -97,7 +97,7 @@ class NativeLaunchTests(unittest.TestCase):
                 "/usr/bin/security",
                 "find-generic-password",
                 "-a",
-                "mark",
+                "testuser",
                 "-s",
                 "Claude Code-credentials",
             ],
@@ -113,12 +113,12 @@ class NativeLaunchTests(unittest.TestCase):
 
         self.assertFalse(
             macos_keychain_login_available(
-                {"USER": "mark"}, run=run, platform="darwin"
+                {"USER": "testuser"}, run=run, platform="darwin"
             )
         )
         self.assertFalse(
             macos_keychain_login_available(
-                {"USER": "mark"}, run=run, platform="linux"
+                {"USER": "testuser"}, run=run, platform="linux"
             )
         )
         self.assertEqual(len(calls), 1)

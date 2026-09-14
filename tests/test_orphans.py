@@ -30,7 +30,9 @@ class OrphanSweepTests(unittest.TestCase):
     def _run_dir(self, home, name, pid, session_id=None):
         run = home / "claude-native-bridge" / "runs" / name
         run.mkdir(parents=True)
-        (run / "native-pid.json").write_text(json.dumps({"pid": pid}))
+        (run / "native-pid.json").write_text(
+            json.dumps({"pid": pid, "start": supervisor.process_start(pid)})
+        )
         if session_id is not None:
             (run / "launch.json").write_text(
                 json.dumps({"session_id": session_id})

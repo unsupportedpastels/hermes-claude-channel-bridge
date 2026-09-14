@@ -1,7 +1,11 @@
 """Profile-scoped configuration; no credential handling or startup at import."""
 
-from dataclasses import dataclass, fields
 import math
+from dataclasses import dataclass, fields
+
+# Claude Code's documented default context window when the status line has not
+# yet reported one for the running model.
+ASSUMED_CONTEXT_WINDOW = 200_000
 
 
 class NativeBridgeError(RuntimeError):
@@ -20,6 +24,13 @@ class Settings:
     page_threshold: int = 20_000
     bootstrap_max_chars: int = 100_000
     retain_diagnostics: bool = False
+    # Bridge-driven rotation replaces native automatic compaction: the native
+    # session is retired between requests and rebuilt from canonical history.
+    native_auto_compact: bool = False
+    rotation_percentage: int = 80
+    rotation_headroom_tokens: int = 40_000
+    rotation_max_tokens: int | None = None
+    rotation_fallback_chars: int = 600_000
 
     @classmethod
     def from_mapping(cls, mapping):
@@ -31,7 +42,11 @@ class Settings:
                 "Unknown claude_native_bridge settings: " + ", ".join(sorted(unknown))
             )
         value = cls(**mapping)
-        for name in ("development_channels_accepted", "retain_diagnostics"):
+        for name in (
+            "development_channels_accepted",
+            "retain_diagnostics",
+            "native_auto_compact",
+        ):
             if type(getattr(value, name)) is not bool:
                 raise NativeBridgeError(name + " must be boolean")
         for name in ("startup_timeout", "request_timeout", "idle_timeout"):
@@ -52,6 +67,34 @@ class Settings:
             or value.bootstrap_max_chars <= 0
         ):
             raise NativeBridgeError("bootstrap_max_chars must be a positive integer")
+        if (
+            type(value.rotation_percentage) is not int
+            or not 1 <= value.rotation_percentage <= 100
+        ):
+            raise NativeBridgeError(
+                "rotation_percentage must be an integer from 1 to 100"
+            )
+        if (
+            type(value.rotation_headroom_tokens) is not int
+            or value.rotation_headroom_tokens < 0
+        ):
+            raise NativeBridgeError(
+                "rotation_headroom_tokens must be a non-negative integer"
+            )
+        if value.rotation_max_tokens is not None and (
+            type(value.rotation_max_tokens) is not int
+            or value.rotation_max_tokens <= 0
+        ):
+            raise NativeBridgeError(
+                "rotation_max_tokens must be a positive integer or null"
+            )
+        if (
+            type(value.rotation_fallback_chars) is not int
+            or value.rotation_fallback_chars <= value.bootstrap_max_chars
+        ):
+            raise NativeBridgeError(
+                "rotation_fallback_chars must be an integer above bootstrap_max_chars"
+            )
         if not isinstance(value.command, str) or not value.command.strip():
             raise NativeBridgeError("command must name the installed Claude executable")
         if value.effort not in ("low", "medium", "high", "xhigh", "max"):
@@ -63,3 +106,23 @@ class Settings:
             raise NativeBridgeError(
                 "Set claude_native_bridge.development_channels_accepted: true only after accepting local development-channel use. No Claude process was started."
             )
+
+
+def rotation_threshold(settings, window):
+    """Native context tokens at which the bridge retires and rebuilds a session."""
+    if type(window) is not int or window <= 0:
+        raise NativeBridgeError("Context window must be a positive integer")
+    headroom_limit = window - settings.rotation_headroom_tokens
+    if headroom_limit <= 0:
+        raise NativeBridgeError(
+            "Reported context window does not leave the configured rotation headroom"
+        )
+    threshold = min(
+        window * settings.rotation_percentage // 100,
+        headroom_limit,
+    )
+    if settings.rotation_max_tokens is not None:
+        threshold = min(threshold, settings.rotation_max_tokens)
+    if threshold <= 0:
+        raise NativeBridgeError("Rotation settings leave no usable context capacity")
+    return threshold

@@ -1,10 +1,26 @@
 import json
-from pathlib import Path
-import tempfile
 import sys
+import tempfile
 import unittest
-from claude_native_bridge.native_hooks import capture, stopped_text
-from claude_native_bridge.windows_security import assert_private_file, secure_runtime_directory
+from pathlib import Path
+
+from claude_native_bridge.native_hooks import capture, open_request, stopped_text
+from claude_native_bridge.windows_security import (
+    assert_private_file,
+    secure_runtime_directory,
+)
+
+
+def submit(root, session="s", prompt_id="prompt-r"):
+    return capture(
+        root,
+        {
+            "session_id": session,
+            "prompt_id": prompt_id,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "request",
+        },
+    )
 
 
 class NativeHookTests(unittest.TestCase):
@@ -13,14 +29,29 @@ class NativeHookTests(unittest.TestCase):
             root = Path(folder)
             if sys.platform == "win32":
                 secure_runtime_directory(root)
-            (root / "active-request.json").write_text(
-                json.dumps({"request_id": "r", "session_id": "s"})
+            open_request(root, "s", "r")
+            self.assertTrue(submit(root))
+            self.assertTrue(
+                capture(
+                    root,
+                    {
+                        "session_id": "s",
+                        "prompt_id": "prompt-r",
+                        "hook_event_name": "MessageDisplay",
+                        "turn_id": "turn-r",
+                        "message_id": "message-r",
+                        "index": 0,
+                        "final": True,
+                        "delta": "A native refusal.",
+                    },
+                )
             )
             self.assertTrue(
                 capture(
                     root,
                     {
                         "session_id": "s",
+                        "prompt_id": "prompt-r",
                         "hook_event_name": "Stop",
                         "last_assistant_message": "A native refusal.",
                     },
@@ -28,6 +59,7 @@ class NativeHookTests(unittest.TestCase):
             )
             record = json.loads((root / "native-stop.json").read_text())
             self.assertEqual(stopped_text(record, "r", "s"), "A native refusal.")
+            self.assertEqual(record["turn_id"], "turn-r")
             if sys.platform == "win32":
                 assert_private_file(root / "native-stop.json")
             else:
@@ -36,6 +68,7 @@ class NativeHookTests(unittest.TestCase):
                 root,
                 {
                     "session_id": "s",
+                    "prompt_id": "prompt-r",
                     "hook_event_name": "StopFailure",
                     "error": "rate_limit",
                     "last_assistant_message": "API Error",
@@ -51,14 +84,14 @@ class NativeHookTests(unittest.TestCase):
             root = Path(folder)
             if sys.platform == "win32":
                 secure_runtime_directory(root)
-            (root / "active-request.json").write_text(
-                json.dumps({"request_id": "r", "session_id": "s"})
-            )
+            open_request(root, "s", "r")
+            self.assertTrue(submit(root))
             self.assertFalse(
                 capture(
                     root,
                     {
                         "session_id": "foreign",
+                        "prompt_id": "prompt-r",
                         "hook_event_name": "Stop",
                         "last_assistant_message": "wrong",
                     },
@@ -68,6 +101,7 @@ class NativeHookTests(unittest.TestCase):
             record = {
                 "request_id": "r",
                 "session_id": "s",
+                "prompt_id": "prompt-r",
                 "event": "Stop",
                 "text": "done",
                 "background_pending": True,

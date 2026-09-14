@@ -7,29 +7,66 @@ Limits belong to this service, not to native inference configuration.
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, field
 import hashlib
 import hmac
 import inspect
 import json
 import queue
-import time
 import threading
-from types import SimpleNamespace
+import time
 import uuid
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .models import MODELS
-from .protocol import _messages, _tool_definitions, _choice, _validate_arguments
+from .protocol import _choice, _messages, _tool_definitions, _validate_arguments
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
 MAX_OWNERS = 32
 OWNER_IDLE_SECONDS = 600.0
 REQUEST_TIMEOUT_SECONDS = 600.0
 CLOSE_TIMEOUT_SECONDS = 5.0
+_PROVENANCE_FIELD = "native_bridge_usage_provenance"
+_PROVENANCE_COUNTERS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+_PROVENANCE_CORRELATIONS = frozenset(
+    {"correlated", "missing", "mismatch", "ambiguous"}
+)
+_COMPACTION_FIELD = "native_bridge_compaction"
+_COMPACTION_STATUSES = frozenset({"compacting", "completed", "failed"})
+_COMPACTION_TRIGGERS = frozenset({"auto", "manual"})
+_COMPACTION_ERRORS = frozenset(
+    {
+        "invalid_event",
+        "overlapping_start",
+        "invalid_context",
+        "correlation_mismatch",
+        "limit_exceeded",
+        "missing_start",
+        "missing_summary",
+        "missing_end",
+    }
+)
+_MAX_COMPACTION_GENERATION = 16_384
+_MAX_COMPACTION_ID_LENGTH = 4096
+_MAX_COMPACTION_SUMMARY_BYTES = 8 * 1024 * 1024
+_ROTATION_FIELD = "native_bridge_rotation"
+_UNEXPECTED_COMPACTION_FIELD = "native_bridge_unexpected_compaction"
+_ROTATION_REASONS = frozenset(
+    {"context_tokens", "incoming_admission", "uncorrelated_usage_chars"}
+)
+_ROTATION_WINDOW_SOURCES = frozenset({"native_status_line", "assumed"})
+_MAX_DIAGNOSTIC_COUNTER = (1 << 63) - 1
+MAX_TOMBSTONES = 1024
+TOMBSTONE_SECONDS = OWNER_IDLE_SECONDS
 _ALLOWED = frozenset(
     {
         "model",
@@ -56,6 +93,13 @@ _ALLOWED = frozenset(
 )
 
 
+def _canonical_uuid(value):
+    try:
+        return str(uuid.UUID(value))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 def _plain(value):
     if isinstance(value, SimpleNamespace):
         return {k: _plain(v) for k, v in vars(value).items()}
@@ -66,6 +110,215 @@ def _plain(value):
     if isinstance(value, (list, tuple)):
         return [_plain(v) for v in value]
     return value
+
+
+def _safe_usage_provenance(value, selected_model):
+    """Project only bounded native status evidence onto the public API."""
+    candidate = (
+        value.get(_PROVENANCE_FIELD)
+        if isinstance(value, dict)
+        else getattr(value, _PROVENANCE_FIELD, None)
+    )
+    if not isinstance(candidate, dict):
+        return None
+    correlation = candidate.get("correlation_status")
+    observed = candidate.get("observed_model")
+    if (
+        candidate.get("source") != "native_status_line"
+        or candidate.get("selected_model") != selected_model
+        or correlation not in _PROVENANCE_CORRELATIONS
+        or (observed is not None and observed not in MODELS)
+        or (correlation == "missing" and observed is not None)
+    ):
+        return None
+
+    counters = {name: None for name in _PROVENANCE_COUNTERS}
+    if correlation == "correlated":
+        raw = candidate.get("raw_counters")
+        if (
+            observed != selected_model
+            or not isinstance(raw, dict)
+            or any(type(raw.get(name)) is not int or raw[name] < 0 for name in counters)
+        ):
+            return None
+        counters = {name: raw[name] for name in _PROVENANCE_COUNTERS}
+
+    return {
+        "source": "native_status_line",
+        "correlation_status": correlation,
+        "selected_model": selected_model,
+        "observed_model": observed,
+        "raw_counters": counters,
+    }
+
+
+def _safe_compaction(value):
+    """Project only bounded lifecycle fields; never serialize native hook payloads."""
+    candidate = (
+        value.get(_COMPACTION_FIELD)
+        if isinstance(value, dict)
+        else getattr(value, _COMPACTION_FIELD, None)
+    )
+    if not isinstance(candidate, dict):
+        return None
+    status = candidate.get("status")
+    trigger = candidate.get("trigger")
+    request_id = candidate.get("request_id")
+    active = candidate.get("active_request")
+    generation = candidate.get("generation")
+    summary_bytes = candidate.get("summary_bytes")
+    error = candidate.get("error")
+    if (
+        status not in _COMPACTION_STATUSES
+        or trigger not in _COMPACTION_TRIGGERS
+        or type(active) is not bool
+        or type(generation) is not int
+        or not 1 <= generation <= _MAX_COMPACTION_GENERATION
+        or not (
+            request_id is None
+            or (
+                isinstance(request_id, str)
+                and 0 < len(request_id) <= _MAX_COMPACTION_ID_LENGTH
+            )
+        )
+        or (active and request_id is None)
+        or (not active and request_id is not None)
+    ):
+        return None
+    if status == "completed":
+        if (
+            type(summary_bytes) is not int
+            or not 0 <= summary_bytes <= _MAX_COMPACTION_SUMMARY_BYTES
+            or error is not None
+        ):
+            return None
+    elif status == "failed":
+        if summary_bytes is not None or error not in _COMPACTION_ERRORS:
+            return None
+    elif status == "compacting" and (
+        summary_bytes is not None or error not in (None, "missing_end")
+    ):
+        return None
+    return {
+        "status": status,
+        "trigger": trigger,
+        "request_id": request_id,
+        "active_request": active,
+        "generation": generation,
+        "summary_bytes": summary_bytes,
+        "error": error,
+    }
+
+
+def _safe_rotation(value):
+    """Project bounded rotation evidence without promoting estimates to tokens."""
+    candidate = (
+        value.get(_ROTATION_FIELD)
+        if isinstance(value, dict)
+        else getattr(value, _ROTATION_FIELD, None)
+    )
+    if not isinstance(candidate, dict) or candidate.get("rotated") is not True:
+        return None
+    reason = candidate.get("reason")
+    exchanges = candidate.get("native_exchanges")
+    if (
+        reason not in _ROTATION_REASONS
+        or type(exchanges) is not int
+        or not 1 <= exchanges <= _MAX_DIAGNOSTIC_COUNTER
+    ):
+        return None
+    if reason in {"context_tokens", "incoming_admission"}:
+        observed = candidate.get("observed_tokens")
+        threshold = candidate.get("threshold_tokens")
+        window = candidate.get("window_tokens")
+        telemetry_exchange = candidate.get("telemetry_exchange")
+        if (
+            type(observed) is not int
+            or type(threshold) is not int
+            or type(window) is not int
+            or type(telemetry_exchange) is not int
+            or not 0 <= observed <= _MAX_DIAGNOSTIC_COUNTER
+            or not 1 <= threshold <= _MAX_DIAGNOSTIC_COUNTER
+            or not 1 <= window <= _MAX_DIAGNOSTIC_COUNTER
+            or threshold >= window
+            or telemetry_exchange != exchanges
+            or candidate.get("window_source") not in _ROTATION_WINDOW_SOURCES
+        ):
+            return None
+        projected = {
+            "rotated": True,
+            "reason": reason,
+            "observed_tokens": observed,
+            "threshold_tokens": threshold,
+            "window_tokens": window,
+            "window_source": candidate["window_source"],
+            "native_exchanges": exchanges,
+            "telemetry_exchange": telemetry_exchange,
+        }
+        if reason == "context_tokens":
+            return projected if observed >= threshold else None
+
+        estimate = candidate.get("incoming_estimate")
+        if (
+            observed >= threshold
+            or not isinstance(estimate, dict)
+            or type(estimate.get("bytes")) is not int
+            or not 1 <= estimate["bytes"] <= _MAX_DIAGNOSTIC_COUNTER
+            or estimate["bytes"] <= threshold - observed
+            or estimate.get("source") != "utf8_bytes_conservative_bound"
+            or "native_tokens" not in estimate
+            or estimate["native_tokens"] is not None
+            or type(estimate.get("saturated")) is not bool
+        ):
+            return None
+        projected["incoming_estimate"] = {
+            "bytes": estimate["bytes"],
+            "source": "utf8_bytes_conservative_bound",
+            "native_tokens": None,
+            "saturated": estimate["saturated"],
+        }
+        return projected
+
+    observed = candidate.get("observed_chars")
+    threshold = candidate.get("threshold_chars")
+    estimate = candidate.get("incoming_estimate")
+    if (
+        type(observed) is not int
+        or type(threshold) is not int
+        or not 0 <= observed <= _MAX_DIAGNOSTIC_COUNTER
+        or not 1 <= threshold <= _MAX_DIAGNOSTIC_COUNTER
+        or not isinstance(estimate, dict)
+        or type(estimate.get("chars")) is not int
+        or not 0 <= estimate["chars"] <= _MAX_DIAGNOSTIC_COUNTER
+        or estimate.get("source") != "serialized_frame_chars"
+        or "native_tokens" not in estimate
+        or estimate["native_tokens"] is not None
+        or type(estimate.get("saturated")) is not bool
+        or (observed < threshold and estimate["chars"] <= threshold - observed)
+    ):
+        return None
+    return {
+        "rotated": True,
+        "reason": reason,
+        "observed_chars": observed,
+        "threshold_chars": threshold,
+        "native_exchanges": exchanges,
+        "incoming_estimate": {
+            "chars": estimate["chars"],
+            "source": "serialized_frame_chars",
+            "native_tokens": None,
+            "saturated": estimate["saturated"],
+        },
+    }
+
+
+def _safe_unexpected_compaction(value):
+    candidate = (
+        value.get(_UNEXPECTED_COMPACTION_FIELD)
+        if isinstance(value, dict)
+        else getattr(value, _UNEXPECTED_COMPACTION_FIELD, None)
+    )
+    return True if candidate is True else None
 
 
 def _validate(body):
@@ -129,6 +382,10 @@ def _validate(body):
 
 
 def _completion(value, body):
+    provenance = _safe_usage_provenance(value, body["model"])
+    compaction = _safe_compaction(value)
+    rotation = _safe_rotation(value)
+    unexpected_compaction = _safe_unexpected_compaction(value)
     value = _plain(value)
     choices = value["choices"]
     if not isinstance(choices, list) or len(choices) != 1:
@@ -200,6 +457,14 @@ def _completion(value, body):
         ],
         "usage": value.get("usage"),
     }
+    if provenance is not None:
+        result[_PROVENANCE_FIELD] = provenance
+    if compaction is not None:
+        result[_COMPACTION_FIELD] = compaction
+    if rotation is not None:
+        result[_ROTATION_FIELD] = rotation
+    if unexpected_compaction is not None:
+        result[_UNEXPECTED_COMPACTION_FIELD] = unexpected_compaction
     if len(json.dumps(result, allow_nan=False).encode()) > MAX_BODY_BYTES:
         raise ValueError("Native result exceeds bounded cache")
     return result
@@ -215,33 +480,126 @@ class Owner:
     result: dict | None = None
     failed: bool = False
     task: asyncio.Task | None = None
+    retirement_task: asyncio.Task | None = None
+    release_task: asyncio.Task | None = None
+    close_task: asyncio.Task | None = None
+    close_confirmed: bool = False
+    capacity_released: bool = False
+    removal_requested: bool = False
+    cleanup_started: bool = False
+    cleanup_completed: bool = False
+    cleanup_success: bool | None = None
+    cleanup_deadline: float | None = None
+    retry_key: tuple[str, str, str] | None = None
+    lineage: str | None = None
+    lease_refs: set[str] = field(default_factory=set)
 
 
-async def _close(owner):
-    engine, owner.engine = owner.engine, None
-    if engine is not None:
-        # Cancellation must not queue behind a saturated inference executor.
-        loop = asyncio.get_running_loop()
-        done = loop.create_future()
+def _cleanup_proof(engine):
+    """Return (explicit seam present, physical capacity is proven free)."""
+    explicit = False
+    for name in ("cleanup_confirmed", "cleanup_resource_free"):
+        try:
+            marker = getattr(engine, name)
+        except AttributeError:
+            continue
+        except BaseException:
+            explicit = True
+            continue
+        explicit = True
+        if marker is True:
+            return True, True
+    return explicit, False
 
-        def resolve():
-            if not done.done():
-                done.set_result(None)
 
-        def close():
-            try:
-                result = engine.close()
-                if inspect.isawaitable(result):
-                    asyncio.run(result)
-            except Exception:
-                pass  # Never leak engine diagnostics/prompts into server logs.
-            finally:
-                with suppress(RuntimeError):
-                    loop.call_soon_threadsafe(resolve)
+def _resource_free_cleanup(engine):
+    """Only an explicit capability may make a hung close capacity-safe."""
+    _, confirmed = _cleanup_proof(engine)
+    return confirmed
 
-        threading.Thread(target=close, daemon=True, name="bridge-close").start()
-        with suppress(TimeoutError):
-            await asyncio.wait_for(done, CLOSE_TIMEOUT_SECONDS)
+
+async def _run_close(owner, engine):
+    # Cancellation must not queue behind a saturated inference executor.
+    loop = asyncio.get_running_loop()
+    done = loop.create_future()
+
+    def resolve(returned):
+        if not done.done():
+            done.set_result(returned)
+
+    def close():
+        returned = False
+        try:
+            result = engine.close()
+            if inspect.isawaitable(result):
+                asyncio.run(result)
+            returned = True
+        except BaseException:
+            pass  # Never leak engine diagnostics/prompts into server logs.
+        with suppress(RuntimeError):
+            loop.call_soon_threadsafe(resolve, returned)
+
+    threading.Thread(target=close, daemon=True, name="bridge-close").start()
+    while not done.done():
+        _, confirmed = _cleanup_proof(engine)
+        if confirmed:
+            owner.capacity_released = True
+        try:
+            await asyncio.wait_for(asyncio.shield(done), 0.1)
+        except TimeoutError:
+            pass
+    returned = await done
+    while True:
+        explicit, confirmed = _cleanup_proof(engine)
+        if confirmed or (returned and not explicit):
+            owner.close_confirmed = True
+            if owner.engine is engine:
+                owner.engine = None
+            owner.capacity_released = True
+            return True
+        if not explicit:
+            return False
+        # An explicit native outcome can become authoritative after close reports
+        # an aggregated error (for example, a late process-exit observation).
+        await asyncio.sleep(0.1)
+
+
+async def _join_cleanup(task, allowance):
+    """Shield retained cleanup through repeated cancellation, but never forever."""
+    deadline = asyncio.get_running_loop().time() + allowance
+    cancelled = False
+    while not task.done():
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            break
+        try:
+            await asyncio.wait_for(asyncio.shield(task), remaining)
+        except asyncio.CancelledError:
+            cancelled = True
+            continue
+        except TimeoutError:
+            break
+    if task.done():
+        await asyncio.gather(task, return_exceptions=True)
+    if cancelled:
+        raise asyncio.CancelledError
+    return task.done()
+
+
+async def _close(owner, *, bounded=True):
+    engine = owner.engine
+    if engine is None:
+        owner.close_confirmed = True
+        owner.capacity_released = True
+        return True
+    if owner.close_task is None:
+        owner.close_task = asyncio.create_task(_run_close(owner, engine))
+    if bounded:
+        completed = await _join_cleanup(owner.close_task, CLOSE_TIMEOUT_SECONDS)
+        if not completed and _resource_free_cleanup(engine):
+            owner.capacity_released = True
+        return owner.close_confirmed
+    return await asyncio.shield(owner.close_task)
 
 
 class Owners:
@@ -249,24 +607,92 @@ class Owners:
         self.factory, self.home = factory, home
         self.limit = MAX_OWNERS if limit is None else limit
         self.items = {}
+        self.tombstones: dict[tuple[str, str, str], float] = {}
+
+    def _prune_tombstones(self):
+        expired = time.monotonic() - TOMBSTONE_SECONDS
+        self.tombstones = {
+            key: created for key, created in self.tombstones.items() if created >= expired
+        }
+
+    def _remember_failure(self, owner):
+        if owner.retry_key is None:
+            return
+        self._prune_tombstones()
+        if len(self.tombstones) >= MAX_TOMBSTONES:
+            oldest = min(self.tombstones, key=lambda item: self.tombstones[item])
+            self.tombstones.pop(oldest, None)
+        self.tombstones[owner.retry_key] = time.monotonic()
+
+    def _capacity_used(self):
+        return sum(not owner.capacity_released for owner in self.items.values())
+
+    def _start_release(self, key, owner):
+        owner.removal_requested = True
+        owner.busy = True
+        if owner.release_task is None:
+            owner.release_task = asyncio.create_task(self._release_owner(key, owner))
+        return owner.release_task
+
+    async def _bounded_release(self, owner):
+        assert owner.release_task is not None
+        completed = await _join_cleanup(
+            owner.release_task, CLOSE_TIMEOUT_SECONDS + 0.1
+        )
+        if not completed and owner.engine is not None:
+            if _resource_free_cleanup(owner.engine):
+                owner.capacity_released = True
 
     async def prune(self):
+        self._prune_tombstones()
+        releases = []
         for key, owner in list(self.items.items()):
-            if not owner.busy and time.monotonic() - owner.touched > OWNER_IDLE_SECONDS:
-                self.items.pop(key, None)
-                await _close(owner)
+            if (
+                not owner.busy
+                and not owner.removal_requested
+                and time.monotonic() - owner.touched >= OWNER_IDLE_SECONDS
+            ):
+                self._start_release(key, owner)
+                releases.append(self._bounded_release(owner))
+        if releases:
+            await asyncio.gather(*releases)
 
-    def admit(self, key, fingerprint, ephemeral):
+    def admit(
+        self,
+        key,
+        fingerprint,
+        ephemeral,
+        retry_key=None,
+        *,
+        lineage=None,
+        lease_refs=(),
+    ):
+        self._prune_tombstones()
+        if retry_key is not None and retry_key in self.tombstones:
+            raise HTTPException(
+                502, "Previous identical request failed; automatic replay refused"
+            )
         owner = self.items.get(key)
-        if owner is not None and owner.busy:
+        if owner is not None and (
+            owner.busy
+            or owner.removal_requested
+            or (owner.close_task is not None and not owner.close_confirmed)
+            or (owner.release_task is not None and not owner.release_task.done())
+            or (owner.cleanup_started and not owner.cleanup_completed)
+        ):
             raise HTTPException(
                 409, "Owner already has an active request; no inference started"
             )
-        if owner is None:
-            if len(self.items) >= self.limit:
+        created = owner is None
+        if created:
+            if self._capacity_used() >= self.limit:
                 raise HTTPException(429, "Bridge owner capacity reached")
             owner = Owner(None, ephemeral=ephemeral)
             self.items[key] = owner
+        assert owner is not None
+        if lineage is not None:
+            owner.lineage = lineage
+            owner.lease_refs.update(lease_refs)
         owner.touched = time.monotonic()
         if owner.fingerprint == fingerprint:
             if owner.failed:
@@ -274,51 +700,122 @@ class Owners:
                     502, "Previous identical request failed; automatic replay refused"
                 )
             if owner.result is not None:
+                owner.retirement_task = None
+                owner.cleanup_started = False
+                owner.cleanup_completed = False
+                owner.cleanup_success = None
+                owner.cleanup_deadline = None
                 owner.busy = True
                 return owner, True
+        if owner.capacity_released and self._capacity_used() >= self.limit:
+            raise HTTPException(429, "Bridge owner capacity reached")
         if owner.engine is None:
             try:
-                owner.engine = self.factory(hermes_home=self.home)
+                engine = self.factory(hermes_home=self.home)
             except Exception:
-                self.items.pop(key, None)
+                if created:
+                    self.items.pop(key, None)
                 raise HTTPException(503, "Bridge engine unavailable") from None
+            owner.engine = engine
+        owner.close_task = None
+        owner.close_confirmed = False
+        owner.capacity_released = False
+        owner.retirement_task = None
+        owner.cleanup_started = False
+        owner.cleanup_completed = False
+        owner.cleanup_success = None
+        owner.cleanup_deadline = None
         owner.busy = True
         owner.fingerprint, owner.result, owner.failed = fingerprint, None, False
+        owner.retry_key = retry_key
         return owner, False
 
-    async def finish(self, key, owner, success):
-        if not success:
-            owner.failed, owner.result = True, None
-            await _close(owner)
-            if owner.task is not None:
-                owner.task.cancel()
-                await asyncio.gather(owner.task, return_exceptions=True)
-        if owner.ephemeral:
-            await _close(owner)
-            self.items.pop(key, None)
-        owner.busy = False
-        owner.task = None
-        owner.touched = time.monotonic()
+    async def _retire(self, key, owner, success):
+        generation = owner.task
+        try:
+            if not success:
+                owner.failed, owner.result = True, None
+                self._remember_failure(owner)
+                if generation is not None:
+                    generation.cancel()
+                    await asyncio.gather(generation, return_exceptions=True)
+                await _close(owner, bounded=False)
+            if owner.ephemeral:
+                owner.removal_requested = True
+                confirmed = await _close(owner, bounded=False)
+                if confirmed and self.items.get(key) is owner:
+                    self.items.pop(key)
+        finally:
+            owner.busy = False
+            owner.task = None
+            owner.touched = time.monotonic()
+            owner.cleanup_completed = True
 
-    async def close_owner(self, key):
-        owner = self.items.pop(key, None)
-        if owner is None:
-            return False
-        await _close(owner)
+    async def finish(self, key, owner, success):
+        if not owner.cleanup_started:
+            owner.cleanup_started = True
+            owner.cleanup_success = success
+            owner.cleanup_deadline = (
+                asyncio.get_running_loop().time() + CLOSE_TIMEOUT_SECONDS + 0.1
+            )
+            owner.retirement_task = asyncio.create_task(
+                self._retire(key, owner, success)
+            )
+        retirement = owner.retirement_task
+        deadline = owner.cleanup_deadline
+        assert retirement is not None and deadline is not None
+        completed = await _join_cleanup(
+            retirement, max(0.0, deadline - asyncio.get_running_loop().time())
+        )
+        if not completed and owner.engine is not None:
+            if _resource_free_cleanup(owner.engine):
+                owner.capacity_released = True
+
+    async def _release_owner(self, key, owner):
+        # Keep ownership until teardown is proven, even if the caller disappears.
+        if owner.busy and owner.result is None:
+            owner.failed = True
+            self._remember_failure(owner)
+        if owner.retirement_task is not None:
+            await asyncio.shield(owner.retirement_task)
         if owner.task is not None:
             owner.task.cancel()
             await asyncio.gather(owner.task, return_exceptions=True)
+        confirmed = await _close(owner, bounded=False)
+        if confirmed and self.items.get(key) is owner:
+            self.items.pop(key)
+
+    async def close_owner(self, key):
+        owner = self.items.get(key)
+        if owner is None:
+            return False
+        self._start_release(key, owner)
+        await self._bounded_release(owner)
         return True
 
+    async def close_lease(self, lineage, lease):
+        """Release one wrapper without retiring a still-referenced lineage binding."""
+        matched = False
+        releases = []
+        for key, owner in list(self.items.items()):
+            if owner.lineage != lineage or lease not in owner.lease_refs:
+                continue
+            matched = True
+            owner.lease_refs.discard(lease)
+            if not owner.lease_refs and not owner.removal_requested:
+                self._start_release(key, owner)
+                releases.append(self._bounded_release(owner))
+        if releases:
+            await asyncio.gather(*releases)
+        return matched
+
     async def shutdown(self):
-        owners = list(self.items.values())
-        self.items.clear()
-        await asyncio.gather(*(_close(owner) for owner in owners))
-        for owner in owners:
-            if owner.task is not None:
-                owner.task.cancel()
+        owners = list(self.items.items())
+        for key, owner in owners:
+            self._start_release(key, owner)
         await asyncio.gather(
-            *(o.task for o in owners if o.task is not None), return_exceptions=True
+            *(self._bounded_release(owner) for _, owner in owners),
+            return_exceptions=True,
         )
 
 
@@ -411,7 +908,15 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
         key = request.headers.get("x-hermes-bridge-client", "")
         if not key or len(key) > 512:
             raise HTTPException(400, "Invalid owner identifier")
-        return {"closed": await owners.close_owner(key)}
+        lineage = _canonical_uuid(
+            request.headers.get("x-hermes-bridge-retry-lineage", "")
+        )
+        closed = (
+            await owners.close_lease(lineage, key)
+            if lineage is not None
+            else await owners.close_owner(key)
+        )
+        return {"closed": closed}
 
     @app.post("/v1/chat/completions")
     async def completions(request: Request):
@@ -436,13 +941,59 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
         owner_header = request.headers.get("x-hermes-bridge-client", "")
         if len(owner_header) > 512:
             raise HTTPException(400, "Invalid owner identifier")
-        ephemeral = not (owner_header and body.get("hermes_session_id"))
-        key = uuid.uuid4().hex if ephemeral else owner_header
+        retry_lineage = _canonical_uuid(
+            request.headers.get("x-hermes-bridge-retry-lineage", "")
+        )
+        binding = body.get("hermes_session_id")
+        logical = bool(owner_header and binding and retry_lineage)
+        ephemeral = not (owner_header and binding)
+        key = (
+            ("logical", retry_lineage, binding)
+            if logical
+            else (uuid.uuid4().hex if ephemeral else owner_header)
+        )
         fingerprint = hashlib.sha256(
             json.dumps(body, sort_keys=True, allow_nan=False).encode()
         ).hexdigest()
+        inference_fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    name: value
+                    for name, value in body.items()
+                    if name not in {"stream", "stream_options", "response_format"}
+                },
+                sort_keys=True,
+                allow_nan=False,
+            ).encode()
+        ).hexdigest()
+        raw_leases = request.headers.get("x-hermes-bridge-leases", "")
+        lease_refs = {
+            lease
+            for value in raw_leases.split(",")[:128]
+            if (lease := _canonical_uuid(value.strip())) is not None
+        }
+        if logical:
+            lease_refs.add(owner_header)
+        retry_key = (
+            (
+                retry_lineage,
+                body["hermes_session_id"],
+                inference_fingerprint,
+            )
+            if isinstance(body.get("hermes_session_id"), str)
+            and body["hermes_session_id"]
+            and retry_lineage
+            else None
+        )
         await owners.prune()
-        owner, cached = owners.admit(key, fingerprint, ephemeral)
+        owner, cached = owners.admit(
+            key,
+            fingerprint,
+            ephemeral,
+            retry_key=retry_key,
+            lineage=retry_lineage if logical else None,
+            lease_refs=lease_refs,
+        )
         streaming = body.get("stream", False)
         events = queue.Queue(maxsize=1024)
         text_size = 0
@@ -514,22 +1065,38 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
                     502, "Native generation failed or disconnected"
                 ) from None
             finally:
-                await asyncio.shield(owners.finish(key, owner, success))
+                await owners.finish(key, owner, success)
 
-        stream_state = {"success": False, "cleaned": False}
+        stream_state = {
+            "success": False,
+            "cleanup_started": False,
+            "cleanup_completed": False,
+        }
 
         async def cleanup():
-            if not stream_state["cleaned"]:
-                stream_state["cleaned"] = True
-                await asyncio.shield(owners.finish(key, owner, stream_state["success"]))
+            if stream_state["cleanup_completed"]:
+                return
+            stream_state["cleanup_started"] = True
+            try:
+                await owners.finish(key, owner, stream_state["success"])
+            finally:
+                stream_state["cleanup_completed"] = owner.cleanup_completed
 
         async def stream():
             streamed = ""
             stream_id = owner.result["id"] if cached else "chatcmpl-" + uuid.uuid4().hex
             created = owner.result["created"] if cached else int(time.time())
 
-            def chunk(delta=None, finish=None, usage=None):
-                return {
+            def chunk(
+                delta=None,
+                finish=None,
+                usage=None,
+                provenance=None,
+                compaction=None,
+                rotation=None,
+                unexpected_compaction=None,
+            ):
+                value = {
                     "id": stream_id,
                     "object": "chat.completion.chunk",
                     "created": created,
@@ -539,6 +1106,15 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
                     else [{"index": 0, "delta": delta or {}, "finish_reason": finish}],
                     "usage": usage,
                 }
+                if provenance is not None:
+                    value[_PROVENANCE_FIELD] = provenance
+                if compaction is not None:
+                    value[_COMPACTION_FIELD] = compaction
+                if rotation is not None:
+                    value[_ROTATION_FIELD] = rotation
+                if unexpected_compaction is not None:
+                    value[_UNEXPECTED_COMPACTION_FIELD] = unexpected_compaction
+                return value
 
             try:
                 yield _sse(chunk({"role": "assistant"}))
@@ -555,6 +1131,7 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
                     result = await task
                 else:
                     result = owner.result
+                assert result is not None
                 message = result["choices"][0]["message"]
                 content = message["content"] or ""
                 if not content.startswith(streamed):
@@ -573,11 +1150,35 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
                             }
                         )
                     )
-                yield _sse(chunk(finish=result["choices"][0]["finish_reason"]))
-                if (body.get("stream_options") or {}).get("include_usage") and result[
-                    "usage"
-                ] is not None:
-                    yield _sse(chunk(usage=result["usage"]))
+                provenance = result.get(_PROVENANCE_FIELD)
+                compaction = result.get(_COMPACTION_FIELD)
+                rotation = result.get(_ROTATION_FIELD)
+                unexpected_compaction = result.get(_UNEXPECTED_COMPACTION_FIELD)
+                include_usage = (
+                    (body.get("stream_options") or {}).get("include_usage")
+                    and result["usage"] is not None
+                )
+                yield _sse(
+                    chunk(
+                        finish=result["choices"][0]["finish_reason"],
+                        provenance=None if include_usage else provenance,
+                        compaction=None if include_usage else compaction,
+                        rotation=None if include_usage else rotation,
+                        unexpected_compaction=(
+                            None if include_usage else unexpected_compaction
+                        ),
+                    )
+                )
+                if include_usage:
+                    yield _sse(
+                        chunk(
+                            usage=result["usage"],
+                            provenance=provenance,
+                            compaction=compaction,
+                            rotation=rotation,
+                            unexpected_compaction=unexpected_compaction,
+                        )
+                    )
                 yield _sse("[DONE]")
                 if not cached:
                     # Keep the wire ID stable for an exact replay.

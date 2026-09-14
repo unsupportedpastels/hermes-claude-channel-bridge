@@ -1,12 +1,15 @@
 [build-system]
-requires = ["setuptools>=68,<83"]
+requires = ["setuptools>=77,<83"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-claude-native-bridge"
 version = "0.2.0"
 description = "Experimental native Claude Code Channels provider for Hermes"
-requires-python = ">=3.11"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11,<3.14"
 dependencies = [
   "PyYAML>=6,<7", "jsonschema>=4,<5", "httpx>=0.27,<1",
   "openai>=2,<3", "fastapi>=0.115,<1", "uvicorn>=0.30,<1",
@@ -30,4 +33,7 @@ pythonpath = ["."]
 include = ["claude_native_bridge*"]
 
 [tool.setuptools.package-data]
-claude_native_bridge = ["channel/server.mjs", "channel/protocol.mjs", "channel/http.mjs", "channel/platform.mjs", "channel/package.json", "channel/package-lock.json"]
+claude_native_bridge = ["channel/README.md", "channel/server.mjs", "channel/protocol.mjs", "channel/http.mjs", "channel/platform.mjs", "channel/package.json", "channel/package-lock.json"]
+
+[tool.setuptools.data-files]
+"share/doc/hermes-claude-native-bridge" = ["RELEASE_NOTES.md"]
