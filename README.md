@@ -141,4 +141,4 @@ Released under the [MIT License](LICENSE).
 
 ## Maintainer
 
-[unsupportedpastels](https://github.com/unsupportedpastels) — [theoldwizard123@pm.me](mailto:theoldwizard123@pm.me)
+[unsupportedpastels](https://github.com/unsupportedpastels)
