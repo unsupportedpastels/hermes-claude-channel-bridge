@@ -15,7 +15,7 @@ Native Claude Code
   MCP Channels + local hooks
 ```
 
-No Hermes core patch, print-mode inference, Agent SDK inference, copied Anthropic credential, or alternate billing route is used. This is an experimental, unpublished plugin; see `RELEASE_NOTES.md` for status and verification details.
+No Hermes core patch, print-mode inference, Agent SDK inference, copied Anthropic credential, or alternate billing route is used. This is an experimental, plugin; see `RELEASE_NOTES.md` for status and verification details.
 
 ## Requirements
 
