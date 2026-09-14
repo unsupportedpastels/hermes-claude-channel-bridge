@@ -138,3 +138,7 @@ The npm step must run before the Python suite because diagnostics validate the i
 ## License
 
 Released under the [MIT License](LICENSE).
+
+## Maintainer
+
+[unsupportedpastels](https://github.com/unsupportedpastels) — [theoldwizard123@pm.me](mailto:theoldwizard123@pm.me)
