@@ -111,6 +111,15 @@ class TextBatches:
         if self.offset > MAX_TEXT_BYTES:
             raise ValueError("Native text journal limit exceeded")
 
+    def awaiting_first_batch(self):
+        """True while no display record has been journalled for this window.
+
+        A tool-call response can outrun the *first* display batch (the hook is a
+        separate process), so callers that have no authoritative text of their
+        own may wait briefly before committing an empty message.
+        """
+        return not self.messages
+
     def awaiting_final(self):
         """True while this journal may still be missing its end-of-message marker.
 

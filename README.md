@@ -100,7 +100,7 @@ All keys live under `claude_native_bridge` in Hermes `config.yaml`.
 - `rotation_percentage` (default 80), `rotation_headroom_tokens`, `rotation_max_tokens`: when Claude's own context counters reach the threshold between turns, the native session is retired and rebuilt from Hermes history within `bootstrap_max_chars`. Without counters, `rotation_fallback_chars` bounds the session instead.
 - `native_auto_compact` (default `false`): opt back into Claude's automatic compaction. Unverified as a recovery path.
 - `retain_diagnostics` (default `false`): keep each native session's private run directory (request-window state, driver markers, spooled results) after teardown, for offline diagnosis.
-- `channel_diagnostics` (default `false`): pass `HERMES_BRIDGE_DIAGNOSTICS=1` to the channel server so its sequence/branch lines are written to the native CLI's own MCP log for the session (IDs and labels only, never request content).
+- `channel_diagnostics` (default `false`): pass `HERMES_BRIDGE_DIAGNOSTICS=1` to the channel server so its sequence/branch lines are appended to `channel-diagnostics.log` inside that session's private runtime directory (IDs, labels and process metadata only, never request content). Nothing is written to the channel's stderr, because a native CLI persists an MCP server's stderr in its own log outside the private runtime; combine with `retain_diagnostics` to keep the file after teardown.
 
 To route Hermes subagents through the bridge:
 

@@ -47,6 +47,8 @@ Hermes owns task-tool execution and approvals. Native task tools are disabled. W
 TMUX_COMMAND_TIMEOUT_SECONDS = 10.0
 # The display hook lands milliseconds after the tool call that ends the message.
 FINAL_BATCH_GRACE_SECONDS = 1.0
+# An empty journal usually means the native yielded with no prose at all.
+FIRST_BATCH_GRACE_SECONDS = 0.25
 FINAL_BATCH_POLL_SECONDS = 0.05
 TERMINATE_GRACE_SECONDS = 2.0
 KILL_GRACE_SECONDS = 1.0
@@ -142,8 +144,9 @@ def macos_keychain_login_available(
 def channel_environment(settings, runtime):
     """Environment for the channel MCP server: no credentials, no content.
 
-    Channel diagnostics are opt-in and land in the native CLI's own MCP log for
-    the session, which outlives this runtime directory.
+    Channel diagnostics are opt-in and stay inside the private runtime directory
+    the channel already receives; they are never written to stderr, which a
+    native CLI persists in its own log outside that directory.
     """
     environment = {"HERMES_BRIDGE_RUNTIME_DIR": str(runtime)}
     if settings.channel_diagnostics:
@@ -596,17 +599,36 @@ class NativeSession:
             if record.get("event") != "Stop" or record.get("background_pending"):
                 stopped_text(record, request_id, self.session_id)
 
-    def _settle_text_batches(self, text_batches, deadline):
-        """Wait briefly for a debounced final display batch.
+    def _settle_text_batches(self, text_batches, deadline, require_text=False):
+        """Wait briefly for a debounced display batch the caller needs.
 
         The display hook is a separate process while the yielding tool call
         travels over the CLI's MCP pipe, so the pipe can win the race by a few
         milliseconds. Waiting here removes that race without weakening
         `TextBatches.finish`, which still refuses an unwitnessed final.
+
+        Two bounds, because the two races cost different things: a message whose
+        end marker is still in flight needs the full grace, while an *empty*
+        journal is the ordinary shape whenever the native yields with no prose at
+        all (measured: 381 of 486 yields), so it only gets the shorter bound
+        rather than taxing most exchanges.
         """
-        settle_deadline = min(deadline, time.monotonic() + FINAL_BATCH_GRACE_SECONDS)
-        while text_batches.awaiting_final() and time.monotonic() < settle_deadline:
-            time.sleep(FINAL_BATCH_POLL_SECONDS)
+        started = time.monotonic()
+        while True:
+            if text_batches.awaiting_final():
+                bound = FINAL_BATCH_GRACE_SECONDS
+            elif require_text and text_batches.awaiting_first_batch():
+                bound = FIRST_BATCH_GRACE_SECONDS
+            else:
+                return
+            budget = deadline - time.monotonic()
+            if time.monotonic() - started >= bound:
+                return
+            # A wait that does not fit in the remaining budget is not attempted:
+            # the tail of an exchange belongs to usage and telemetry collection.
+            if budget < bound + FINAL_BATCH_POLL_SECONDS:
+                return
+            time.sleep(min(FINAL_BATCH_POLL_SECONDS, bound - (time.monotonic() - started)))
             text_batches.drain(self.runtime)
 
     def exchange(self, content, request_id, cancel_check=None, on_text=None):
@@ -750,7 +772,7 @@ class NativeSession:
                             "Native bridge response correlation failed"
                         )
                     text_batches.drain(self.runtime)
-                    self._settle_text_batches(text_batches, deadline)
+                    self._settle_text_batches(text_batches, deadline, require_text=True)
                     # A display-final closes a message, not the native turn: respond
                     # can follow it. Never dispatch partial or inferred tool calls.
                     self.last_text = text_batches.finish()
