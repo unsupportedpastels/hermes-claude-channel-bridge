@@ -111,6 +111,17 @@ class TextBatches:
         if self.offset > MAX_TEXT_BYTES:
             raise ValueError("Native text journal limit exceeded")
 
+    def awaiting_final(self):
+        """True while this journal may still be missing its end-of-message marker.
+
+        A debounced final display batch and a concurrent hook append (a partial
+        trailing line) both leave the record incomplete for now, so the caller
+        may wait briefly before deciding the journal is final.
+        """
+        return self.partial or any(
+            not values or not values[-1][1] for values in self.messages.values()
+        )
+
     def finish(self, final_text=None):
         if self.partial:
             raise ValueError("Incomplete native text journal record")

@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import inspect
 import json
+import logging
 import queue
 import threading
 import time
@@ -24,6 +25,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .models import MODELS
 from .protocol import _choice, _messages, _tool_definitions, _validate_arguments
+from .settings import NativeRequestNotDelivered
+
+logger = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
 MAX_OWNERS = 32
@@ -470,6 +474,32 @@ def _completion(value, body):
     return result
 
 
+def _not_delivered(exc):
+    """True only when the failure proves the native never accepted the request.
+
+    Deliberately narrow: an engine reports this only for failures raised before
+    it called the channel, so the tombstone keeps covering every case where a
+    native turn may already exist.
+    """
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, NativeRequestNotDelivered):
+            return True
+        seen.add(id(current))
+        current = current.__cause__
+    return False
+
+
+def _log_generation_failure(exc, uncertain):
+    """Bounded failure evidence: class names and our own branch label only."""
+    logger.warning(
+        "bridge generation %s: %s",
+        "uncertain" if uncertain else "not_delivered",
+        type(exc).__name__,
+    )
+
+
 @dataclass
 class Owner:
     engine: object
@@ -479,6 +509,9 @@ class Owner:
     fingerprint: str | None = None
     result: dict | None = None
     failed: bool = False
+    # The last failure proved the native never accepted the request, so an
+    # identical retry is admitted instead of being treated as a replay.
+    replayable: bool = False
     task: asyncio.Task | None = None
     retirement_task: asyncio.Task | None = None
     release_task: asyncio.Task | None = None
@@ -669,6 +702,9 @@ class Owners:
     ):
         self._prune_tombstones()
         if retry_key is not None and retry_key in self.tombstones:
+            logger.warning(
+                "bridge replay refused: identical request after an uncertain attempt"
+            )
             raise HTTPException(
                 502, "Previous identical request failed; automatic replay refused"
             )
@@ -695,7 +731,10 @@ class Owners:
             owner.lease_refs.update(lease_refs)
         owner.touched = time.monotonic()
         if owner.fingerprint == fingerprint:
-            if owner.failed:
+            if owner.failed and not owner.replayable:
+                logger.warning(
+                    "bridge replay refused: identical request after an uncertain attempt"
+                )
                 raise HTTPException(
                     502, "Previous identical request failed; automatic replay refused"
                 )
@@ -727,15 +766,18 @@ class Owners:
         owner.cleanup_deadline = None
         owner.busy = True
         owner.fingerprint, owner.result, owner.failed = fingerprint, None, False
+        owner.replayable = False
         owner.retry_key = retry_key
         return owner, False
 
-    async def _retire(self, key, owner, success):
+    async def _retire(self, key, owner, success, uncertain=True):
         generation = owner.task
         try:
             if not success:
                 owner.failed, owner.result = True, None
-                self._remember_failure(owner)
+                owner.replayable = not uncertain
+                if uncertain:
+                    self._remember_failure(owner)
                 if generation is not None:
                     generation.cancel()
                     await asyncio.gather(generation, return_exceptions=True)
@@ -751,7 +793,7 @@ class Owners:
             owner.touched = time.monotonic()
             owner.cleanup_completed = True
 
-    async def finish(self, key, owner, success):
+    async def finish(self, key, owner, success, uncertain=True):
         if not owner.cleanup_started:
             owner.cleanup_started = True
             owner.cleanup_success = success
@@ -759,7 +801,7 @@ class Owners:
                 asyncio.get_running_loop().time() + CLOSE_TIMEOUT_SECONDS + 0.1
             )
             owner.retirement_task = asyncio.create_task(
-                self._retire(key, owner, success)
+                self._retire(key, owner, success, uncertain)
             )
         retirement = owner.retirement_task
         deadline = owner.cleanup_deadline
@@ -1050,6 +1092,7 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
 
         if not streaming:
             success = False
+            uncertain = True
             try:
                 while not task.done():
                     await check()
@@ -1060,15 +1103,18 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
                 return JSONResponse(result)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                uncertain = not _not_delivered(exc)
+                _log_generation_failure(exc, uncertain)
                 raise HTTPException(
                     502, "Native generation failed or disconnected"
                 ) from None
             finally:
-                await owners.finish(key, owner, success)
+                await owners.finish(key, owner, success, uncertain=uncertain)
 
         stream_state = {
             "success": False,
+            "uncertain": True,
             "cleanup_started": False,
             "cleanup_completed": False,
         }
@@ -1078,7 +1124,12 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
                 return
             stream_state["cleanup_started"] = True
             try:
-                await owners.finish(key, owner, stream_state["success"])
+                await owners.finish(
+                    key,
+                    owner,
+                    stream_state["success"],
+                    uncertain=stream_state["uncertain"],
+                )
             finally:
                 stream_state["cleanup_completed"] = owner.cleanup_completed
 
@@ -1187,7 +1238,9 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
                 stream_state["success"] = True
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                stream_state["uncertain"] = not _not_delivered(exc)
+                _log_generation_failure(exc, stream_state["uncertain"])
                 yield _sse(
                     {
                         "error": {
