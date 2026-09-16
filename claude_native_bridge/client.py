@@ -6,6 +6,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import logging
 import os
 import threading
 import uuid
@@ -22,10 +23,13 @@ from .protocol import HistoryTracker, build_completion
 from .settings import (
     ASSUMED_CONTEXT_WINDOW,
     NativeBridgeError,
+    NativeRequestNotDelivered,
     Settings,
     rotation_threshold,
 )
 from .usage import completion_usage_provenance
+
+logger = logging.getLogger(__name__)
 
 ASYNC_CLOSE_TIMEOUT_SECONDS = 5.0
 _COMPACTION_STATUSES = frozenset({"compacting", "completed", "failed"})
@@ -231,6 +235,42 @@ class ClientCleanupOutcome:
     @property
     def safe_to_release_capacity(self):
         return not self.uncertain_bindings
+
+
+_NOT_DELIVERED_PREFIX = (
+    "Native request was not delivered; the engine was retired before any native "
+    "input. A retry rebuilds from canonical history."
+)
+
+
+def _not_delivered_error(exc):
+    """Tag a failure as replayable while keeping its specific diagnostic."""
+    detail = str(exc).strip() or type(exc).__name__
+    return NativeRequestNotDelivered(_NOT_DELIVERED_PREFIX + " Cause: " + detail[:200])
+
+
+def _record_native_failure(native, exc, branch):
+    """Best-effort bounded evidence in the session's private runtime directory.
+
+    Records our own branch label, the exception class name and a bounded
+    exception message. The directory already holds native output; nothing here
+    is promoted into logs or the public API.
+    """
+    runtime = getattr(native, "runtime", None)
+    write = getattr(native, "_private_json", None)
+    if runtime is None or not callable(write):
+        return
+    try:
+        write(
+            "native-failure.json",
+            {
+                "branch": branch,
+                "error": type(exc).__name__,
+                "message": str(exc)[:200],
+            },
+        )
+    except BaseException:
+        pass
 
 
 def _physical_cleanup_outcome(native, returned=None):
@@ -977,16 +1017,36 @@ class NativeBridgeClient:
                 state.native = None
                 state.history.reset()
                 raise
+            except NativeRequestNotDelivered as exc:
+                # No native input exists for this attempt, so the caller may
+                # retry the identical request; the next attempt rebuilds from
+                # canonical history instead of resurrecting a native turn.
+                logger.warning(
+                    "native request failed before delivery: %s", type(exc).__name__
+                )
+                _record_native_failure(state.native, exc, "not_delivered")
+                self.close()
+                raise
             except NativeBridgeError as exc:
                 native = state.native
+                if not exchange_started:
+                    # This request never reached a native session: the engine was
+                    # retired before any native input, so the caller may retry it.
+                    logger.warning(
+                        "native request failed before delivery: %s", type(exc).__name__
+                    )
+                    _record_native_failure(native, exc, "not_delivered")
+                    self.close()
+                    raise _not_delivered_error(exc) from exc
                 session_lost = False
                 health = getattr(native, "health", None)
-                if native is not None and exchange_started and callable(health):
+                if native is not None and callable(health):
                     try:
                         session_lost = not health()
                     except BaseException:
                         # An inconclusive liveness probe is still an ambiguous failure.
                         session_lost = False
+                _record_native_failure(native, exc, "uncertain")
                 if session_lost:
                     assert native is not None
                     native.close()
@@ -997,10 +1057,23 @@ class NativeBridgeClient:
                         "The uncertain in-flight request was not replayed."
                     ) from exc
                 # Once a response is uncertain, never retry against this hidden native state.
+                logger.warning(
+                    "native generation uncertain: %s", type(exc).__name__
+                )
                 self.close()
                 raise
-            except BaseException:
+            except BaseException as exc:
+                if not exchange_started:
+                    # Nothing was delivered for this request; see the branch above.
+                    logger.warning(
+                        "native request failed before delivery: %s", type(exc).__name__
+                    )
+                    _record_native_failure(state.native, exc, "not_delivered")
+                    self.close()
+                    raise _not_delivered_error(exc) from exc
                 # Once a response is uncertain, never retry against this hidden native state.
+                logger.warning("native generation failed: %s", type(exc).__name__)
+                _record_native_failure(state.native, exc, "unexpected")
                 self.close()
                 raise
             finally:

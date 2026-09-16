@@ -12,6 +12,15 @@ class NativeBridgeError(RuntimeError):
     pass
 
 
+class NativeRequestNotDelivered(NativeBridgeError):
+    """The native never accepted the request, so no native input is uncertain.
+
+    Raised only for failures before the channel accepted the request window.
+    Callers may retry the identical request: the session is retired and a
+    rebuild consumes canonical Hermes history, not a stale native state.
+    """
+
+
 @dataclass(frozen=True)
 class Settings:
     development_channels_accepted: bool = False
@@ -24,6 +33,9 @@ class Settings:
     page_threshold: int = 20_000
     bootstrap_max_chars: int = 100_000
     retain_diagnostics: bool = False
+    # Channel-side diagnostics are written to the native CLI's own MCP log for
+    # this session (ids, sequences and branch labels only; never content).
+    channel_diagnostics: bool = False
     # Bridge-driven rotation replaces native automatic compaction: the native
     # session is retired between requests and rebuilt from canonical history.
     native_auto_compact: bool = False
@@ -45,6 +57,7 @@ class Settings:
         for name in (
             "development_channels_accepted",
             "retain_diagnostics",
+            "channel_diagnostics",
             "native_auto_compact",
         ):
             if type(getattr(value, name)) is not bool:

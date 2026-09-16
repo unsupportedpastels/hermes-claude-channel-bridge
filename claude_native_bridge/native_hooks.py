@@ -16,6 +16,8 @@ MAX_CONTROL_BYTES = 16 * 1024
 MAX_COMPACTION_ID_LENGTH = 4096
 WAKE_TIMEOUT_SECONDS = 0.05
 WAKE_EVENTS = frozenset(("MessageDisplay", "Stop", "StopFailure", "Usage"))
+# Hook events that can only be an echo once their request window has closed.
+_ECHO_EVENTS = frozenset(("MessageDisplay", "Stop", "StopFailure", "UserPromptSubmit"))
 COMPACTION_TRIGGERS = frozenset(("auto", "manual"))
 COMPACTION_STATUSES = frozenset(("compacting", "completed", "failed"))
 
@@ -93,7 +95,9 @@ def _read_compaction_path_locked(path):
         or type(value.get("active_request")) is not bool
         or type(value.get("generation")) is not int
         or not 1 <= value["generation"] <= MAX_COMPACTIONS
-        or not (value.get("summary_bytes") is None or type(value["summary_bytes"]) is int)
+        or not (
+            value.get("summary_bytes") is None or type(value["summary_bytes"]) is int
+        )
         or not (value.get("error") is None or isinstance(value["error"], str))
     ):
         raise ValueError("Invalid native compaction state")
@@ -108,19 +112,24 @@ def _fail_compaction_locked(runtime, current, error, *, payload=None, owner=None
     if type(generation) is not int:
         generation = previous["generation"] if previous is not None else 1
     prompt_id = payload.get("prompt_id") or owner.get("prompt_id")
-    if not isinstance(prompt_id, str) or not 0 < len(prompt_id) <= MAX_COMPACTION_ID_LENGTH:
+    if (
+        not isinstance(prompt_id, str)
+        or not 0 < len(prompt_id) <= MAX_COMPACTION_ID_LENGTH
+    ):
         prompt_id = current.get("prompt_id")
-    if not isinstance(prompt_id, str) or not 0 < len(prompt_id) <= MAX_COMPACTION_ID_LENGTH:
+    if (
+        not isinstance(prompt_id, str)
+        or not 0 < len(prompt_id) <= MAX_COMPACTION_ID_LENGTH
+    ):
         prompt_id = "unknown"
     retired = current.get("retired_prompt_ids", [])
     known_old_event = prompt_id in retired and prompt_id != current.get("prompt_id")
     owner_request_id = owner.get("request_id")
     owner_active = owner.get("active_request") is True
     if owner:
-        poisons_current = (
-            current.get("open") is True
-            and owner_request_id == current.get("request_id")
-        )
+        poisons_current = current.get(
+            "open"
+        ) is True and owner_request_id == current.get("request_id")
     else:
         poisons_current = current.get("open") is True and not known_old_event
         owner_request_id = current.get("request_id") if poisons_current else None
@@ -225,9 +234,10 @@ def notify_wake(runtime, wake, *, timeout=WAKE_TIMEOUT_SECONDS):
             method="POST",
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status == 200 and len(
-                response.read(MAX_CONTROL_BYTES + 1)
-            ) <= MAX_CONTROL_BYTES
+            return (
+                response.status == 200
+                and len(response.read(MAX_CONTROL_BYTES + 1)) <= MAX_CONTROL_BYTES
+            )
     except (OSError, ValueError, TypeError):
         return False
 
@@ -435,13 +445,19 @@ def _capture_compaction_locked(runtime, payload, current):
             and pending["status"] == "compacting"
             and pending.get("error") != "missing_end"
         ):
-            _fail_compaction_locked(runtime, current, "overlapping_start", payload=payload)
+            _fail_compaction_locked(
+                runtime, current, "overlapping_start", payload=payload
+            )
             return None
         if (active and trigger != "auto") or (not active and trigger != "manual"):
-            _fail_compaction_locked(runtime, current, "invalid_context", payload=payload)
+            _fail_compaction_locked(
+                runtime, current, "invalid_context", payload=payload
+            )
             return None
         if active and prompt_id != current.get("prompt_id"):
-            _fail_compaction_locked(runtime, current, "correlation_mismatch", payload=payload)
+            _fail_compaction_locked(
+                runtime, current, "correlation_mismatch", payload=payload
+            )
             return None
         generation = 1 if previous is None else previous["generation"] + 1
         if generation > MAX_COMPACTIONS:
@@ -462,7 +478,11 @@ def _capture_compaction_locked(runtime, payload, current):
         _private_json(runtime / "native-compaction-pending.json", record)
     else:
         retained = pending
-        if retained is None and previous is not None and previous["status"] == "compacting":
+        if (
+            retained is None
+            and previous is not None
+            and previous["status"] == "compacting"
+        ):
             retained = previous
         if retained is None:
             _fail_compaction_locked(runtime, current, "missing_start", payload=payload)
@@ -472,7 +492,9 @@ def _capture_compaction_locked(runtime, payload, current):
             or retained["prompt_id"] != prompt_id
             or retained["trigger"] != trigger
         ):
-            _fail_compaction_locked(runtime, current, "correlation_mismatch", payload=payload)
+            _fail_compaction_locked(
+                runtime, current, "correlation_mismatch", payload=payload
+            )
             return None
         summary = payload.get("compact_summary")
         if not isinstance(summary, str) or not summary:
@@ -496,8 +518,28 @@ def _capture_compaction_locked(runtime, payload, current):
 
     # The channel already accepts Usage wakes. Reuse that transport hint for
     # active automatic compaction; the journal above remains authoritative.
-    same_active_request = active and record.get("request_id") == current.get("request_id")
+    same_active_request = active and record.get("request_id") == current.get(
+        "request_id"
+    )
     return _next_wake_locked(runtime, current, "Usage") if same_active_request else {}
+
+
+def _late_echo_for_unsealed_prompt(payload, current):
+    """True for a hook event that is only an echo of a closed request window.
+
+    The tool-call handoff retires its request without sealing the prompt so the
+    native turn can continue. Debounced display and stop hooks for that same,
+    still-unsealed prompt can arrive in the window before the next request
+    opens. They carry no new input and must not poison the continuation.
+    """
+    prompt_id = payload.get("prompt_id")
+    if not isinstance(prompt_id, str) or not prompt_id:
+        return False
+    if prompt_id != current.get("prompt_id"):
+        return False
+    if prompt_id in current.get("retired_prompt_ids", []):
+        return False
+    return payload.get("hook_event_name") in _ECHO_EVENTS
 
 
 def capture(runtime, payload):
@@ -509,11 +551,12 @@ def capture(runtime, payload):
             if payload.get("session_id") != current.get("session_id"):
                 return False
             event = payload.get("hook_event_name")
-            if (
-                current.get("open", True) is not True
-                and event not in ("PreCompact", "PostCompact")
+            if current.get("open", True) is not True and event not in (
+                "PreCompact",
+                "PostCompact",
             ):
-                _mark_attribution_error(runtime)
+                if not _late_echo_for_unsealed_prompt(payload, current):
+                    _mark_attribution_error(runtime)
                 return False
             if event in ("PreCompact", "PostCompact"):
                 wake = _capture_compaction_locked(runtime, payload, current)

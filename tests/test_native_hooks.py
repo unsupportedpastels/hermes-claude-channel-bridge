@@ -4,7 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from claude_native_bridge.native_hooks import capture, open_request, stopped_text
+from claude_native_bridge.native_hooks import (
+    capture,
+    open_request,
+    retire_request,
+    stopped_text,
+)
 from claude_native_bridge.windows_security import (
     assert_private_file,
     secure_runtime_directory,
@@ -24,6 +29,68 @@ def submit(root, session="s", prompt_id="prompt-r"):
 
 
 class NativeHookTests(unittest.TestCase):
+    def test_late_echo_for_the_unsealed_prompt_does_not_poison_the_continuation(self):
+        """A hook event that outlives its request window is an echo, not a violation.
+
+        The tool-call handoff retires the request without sealing its prompt, so
+        debounced display/stop hooks for that same prompt can land before the
+        next window opens. Treating them as attribution failures made the whole
+        following request fail.
+        """
+        echoes = (
+            {
+                "hook_event_name": "MessageDisplay",
+                "turn_id": "t1",
+                "message_id": "m1",
+                "index": 0,
+                "final": False,
+                "delta": "x",
+            },
+            {"hook_event_name": "Stop", "turn_id": "t1", "last_assistant_message": "x"},
+            {"hook_event_name": "StopFailure", "turn_id": "t1", "error": "x"},
+            {"hook_event_name": "UserPromptSubmit", "prompt": "request"},
+        )
+        for echo in echoes:
+            with self.subTest(event=echo["hook_event_name"]):
+                with tempfile.TemporaryDirectory() as folder:
+                    root = Path(folder)
+                    if sys.platform == "win32":
+                        secure_runtime_directory(root)
+                    open_request(root, "s", "r-1")
+                    self.assertTrue(submit(root))
+                    retire_request(root, "s", "r-1", seal_prompt=False)
+                    self.assertFalse((root / "native-attribution-error").exists())
+
+                    capture(root, {"session_id": "s", "prompt_id": "prompt-r", **echo})
+
+                    self.assertFalse((root / "native-attribution-error").exists())
+                    open_request(root, "s", "r-2", continued_prompt_id="prompt-r")
+
+    def test_echo_for_a_sealed_prompt_is_still_an_attribution_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            if sys.platform == "win32":
+                secure_runtime_directory(root)
+            open_request(root, "s", "r-1")
+            self.assertTrue(submit(root))
+            retire_request(root, "s", "r-1", seal_prompt=True)
+
+            capture(
+                root,
+                {
+                    "session_id": "s",
+                    "prompt_id": "prompt-r",
+                    "hook_event_name": "MessageDisplay",
+                    "turn_id": "t1",
+                    "message_id": "m1",
+                    "index": 0,
+                    "final": False,
+                    "delta": "x",
+                },
+            )
+
+            self.assertTrue((root / "native-attribution-error").exists())
+
     def test_real_final_text_is_preserved_but_api_error_is_never_success(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -63,7 +130,9 @@ class NativeHookTests(unittest.TestCase):
             if sys.platform == "win32":
                 assert_private_file(root / "native-stop.json")
             else:
-                self.assertEqual((root / "native-stop.json").stat().st_mode & 0o777, 0o600)
+                self.assertEqual(
+                    (root / "native-stop.json").stat().st_mode & 0o777, 0o600
+                )
             capture(
                 root,
                 {
