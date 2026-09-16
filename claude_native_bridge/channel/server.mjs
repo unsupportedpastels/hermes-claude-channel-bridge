@@ -36,8 +36,16 @@ async function readResult(dir, args) {
     return toolText('handle expired; re-run the tool', true);
   }
 }
+// Diagnostics stay inside the private session runtime: a native CLI persists an MCP
+// server's stderr in its own log, which is neither a private nor a temporary
+// location, so sequences and process metadata must never be written there.
 const log = (event, metadata = {}) => {
-  if (process.env.HERMES_BRIDGE_DIAGNOSTICS === '1') process.stderr.write(JSON.stringify({time: new Date().toISOString(), event, ...metadata}) + '\n');
+  if (process.env.HERMES_BRIDGE_DIAGNOSTICS !== '1') return;
+  const dir = process.env.HERMES_BRIDGE_RUNTIME_DIR;
+  if (!dir) return;
+  try {
+    fs.appendFileSync(path.join(dir, 'channel-diagnostics.log'), JSON.stringify({time: new Date().toISOString(), event, ...metadata}) + '\n');
+  } catch {}
 };
 
 let mcp, httpServer, bridge, readyFile, tempFile, lockFile;

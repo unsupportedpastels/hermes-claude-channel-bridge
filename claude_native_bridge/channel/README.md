@@ -57,7 +57,7 @@ Malformed inputs return 400, unauthorized calls 401, stale/overlapping transitio
 - Native cancellation while `respond` is held permanently fails that transport, rejects the held promise, and releases HTTP waiters with 503. Old cancellation listeners cannot corrupt a later acknowledged transition.
 - EOF, transport close, and supported termination signals clean pending work and owned ready/lock files with a bounded deadline. Forced process termination can leave files; the owner must retire the runtime directory.
 - The owner bounds startup, session life, tool waits, and idle time. A held call is not answered by a bridge heartbeat; indefinite idle is not supported.
-- Default diagnostics are silent. `HERMES_BRIDGE_DIAGNOSTICS=1` writes timestamped metadata-only events to stderr, never prompts, output text, identifiers, or tokens. MCP protocol messages alone use stdout.
+- Default diagnostics are silent. `HERMES_BRIDGE_DIAGNOSTICS=1` appends timestamped metadata-only events to `channel-diagnostics.log` in the private runtime directory, never prompts, output text, identifiers, or tokens, and never to stderr (a CLI persists MCP stderr in its own log, outside the private runtime). MCP protocol messages alone use stdout.
 
 ## Verification scope
 

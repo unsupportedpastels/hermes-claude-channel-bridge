@@ -15,7 +15,10 @@ from urllib.parse import urlparse
 
 import pytest
 
-from claude_native_bridge.native import NativeSession
+from claude_native_bridge.native import (
+    FINAL_BATCH_GRACE_SECONDS,
+    NativeSession,
+)
 from claude_native_bridge.native_hooks import capture
 from claude_native_bridge.settings import Settings
 
@@ -37,8 +40,9 @@ class FakeResponse:
 class ScriptedHTTP:
     """Serves /advance and /response, binding the prompt like a real hook does."""
 
-    def __init__(self, session, scripts):
+    def __init__(self, session, scripts, seed=True):
         self.session = session
+        self.seed = seed
         self.scripts = {path: list(entries) for path, entries in scripts.items()}
         self.calls = []
 
@@ -58,14 +62,15 @@ class ScriptedHTTP:
                     "prompt": "fixture",
                 },
             )
-            self.session.write_batch(0, False, "hello ")
+            if self.seed:
+                self.session.write_batch(0, False, "hello ")
         return FakeResponse(entry)
 
     def close(self):
         return None
 
 
-def session_with_journal(tmp_path, monkeypatch):
+def session_with_journal(tmp_path, monkeypatch, seed=True):
     session = NativeSession(
         Settings(development_channels_accepted=True, retain_diagnostics=True),
         tmp_path,
@@ -108,6 +113,7 @@ def session_with_journal(tmp_path, monkeypatch):
                 }
             ],
         },
+        seed=seed,
     )
     monkeypatch.setattr(session, "close", lambda: setattr(session, "closed", True))
     monkeypatch.setattr(
@@ -115,7 +121,10 @@ def session_with_journal(tmp_path, monkeypatch):
     )
 
     def append_final():
-        write_batch(1, True, "world")
+        if seed:
+            write_batch(1, True, "world")
+        else:
+            write_batch(0, True, "hello world")
 
     return session, append_final
 
@@ -141,3 +150,33 @@ def test_missing_final_display_batch_still_fails_bounded(tmp_path, monkeypatch):
         session.exchange("frame", REQUEST_ID)
 
     assert time.monotonic() - started < 5
+
+
+def test_response_before_the_first_display_batch_keeps_the_prose(tmp_path, monkeypatch):
+    session, append_final = session_with_journal(tmp_path, monkeypatch, seed=False)
+    # The status-line usage snapshot is a separate hook with its own bound; this
+    # test is about the display journal, and the harness runs no status line.
+    monkeypatch.setattr(session, "_collect_usage", lambda *a, **k: None)
+    timer = threading.Timer(0.1, append_final)
+    timer.start()
+    try:
+        response = session.exchange("frame", REQUEST_ID)
+    finally:
+        timer.join()
+
+    assert response["kind"] == "tool_calls"
+    assert session.last_text == "hello world"
+
+
+def test_prose_less_yield_commits_empty_under_the_short_bound(tmp_path, monkeypatch):
+    session, _ = session_with_journal(tmp_path, monkeypatch, seed=False)
+    monkeypatch.setattr(session, "_collect_usage", lambda *a, **k: None)
+    started = time.monotonic()
+    response = session.exchange("frame", REQUEST_ID)
+    elapsed = time.monotonic() - started
+
+    assert response["kind"] == "tool_calls"
+    assert session.last_text == ""
+    assert elapsed < FINAL_BATCH_GRACE_SECONDS, (
+        f"a prose-less yield must not pay the full grace ({elapsed:.2f}s)"
+    )

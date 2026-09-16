@@ -1,6 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import http from 'node:http';
+import path from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {fixture} from './fixture-support.mjs';
 import {MAX_BYTES} from './protocol.mjs';
@@ -38,7 +40,8 @@ test('every HTTP route authenticates before dispatch; invalid bodies do not muta
   await f.advance(1, 'b');
   await pending;
   await f.client.close();
-  const text = f.logs.join('');
+  const text = await fs.readFile(path.join(f.dir, 'channel-diagnostics.log'), 'utf8');
+  assert.equal(f.logs.join(''), '', 'diagnostics never reach the CLI-visible stderr');
   assert.ok(text.includes('http_rejected'));
   for (const forbidden of [f.token, valid.request.content, 'sensitive final must not be logged']) assert.ok(!text.includes(forbidden));
   for (const line of text.trim().split('\n')) {
