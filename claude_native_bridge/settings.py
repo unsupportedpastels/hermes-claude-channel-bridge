@@ -8,8 +8,28 @@ from dataclasses import dataclass, fields
 ASSUMED_CONTEXT_WINDOW = 200_000
 
 
+NATIVE_LOGIN_REFRESH_CONTENTION_TEXT = (
+    "Could not refresh your login because another Claude Code process is refreshing it "
+    "(or exited mid-refresh) · Try again in a minute; if it keeps happening, close other "
+    "Claude Code windows or sign in again with /login"
+)
+LOGIN_REFRESH_CONTENTION_MESSAGE = (
+    "Claude authentication needs attention. Run `claude auth login` as the bridge's "
+    "OS user on the machine running the bridge, then start a fresh /review. "
+    "Claude credentials may be stale or refresh is blocked. Hermes API keys are not the issue."
+)
+LOGIN_REFRESH_CONTENTION_CODE = "claude_login_refresh_contention"
+
+
 class NativeBridgeError(RuntimeError):
     pass
+
+
+class NativeLoginRefreshContention(NativeBridgeError):
+    """Actionable terminal auth failure derived from a recognized native error."""
+
+    def __init__(self):
+        super().__init__(LOGIN_REFRESH_CONTENTION_MESSAGE)
 
 
 class NativeRequestNotDelivered(NativeBridgeError):

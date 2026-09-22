@@ -25,7 +25,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .models import MODELS
 from .protocol import _choice, _messages, _tool_definitions, _validate_arguments
-from .settings import NativeRequestNotDelivered
+from .settings import (
+    LOGIN_REFRESH_CONTENTION_CODE,
+    LOGIN_REFRESH_CONTENTION_MESSAGE,
+    NativeLoginRefreshContention,
+    NativeRequestNotDelivered,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -491,6 +496,32 @@ def _not_delivered(exc):
     return False
 
 
+def _terminal_error(exc):
+    """Return a fixed safe provider error for the one recognized terminal failure."""
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, NativeLoginRefreshContention):
+            return {
+                "message": LOGIN_REFRESH_CONTENTION_MESSAGE,
+                "type": "authentication_error",
+                "code": LOGIN_REFRESH_CONTENTION_CODE,
+            }
+        seen.add(id(current))
+        current = current.__cause__
+    return None
+
+
+def _error_response(error):
+    return JSONResponse({"error": error}, status_code=502)
+
+
+class _TerminalHTTPError(Exception):
+    def __init__(self, error):
+        super().__init__(error["code"])
+        self.error = error
+
+
 def _log_generation_failure(exc, uncertain):
     """Bounded failure evidence: class names and our own branch label only."""
     logger.warning(
@@ -509,6 +540,7 @@ class Owner:
     fingerprint: str | None = None
     result: dict | None = None
     failed: bool = False
+    terminal_error: dict | None = None
     # The last failure proved the native never accepted the request, so an
     # identical retry is admitted instead of being treated as a replay.
     replayable: bool = False
@@ -641,11 +673,17 @@ class Owners:
         self.limit = MAX_OWNERS if limit is None else limit
         self.items = {}
         self.tombstones: dict[tuple[str, str, str], float] = {}
+        self.terminal_failures: dict[tuple[str, str, str], dict] = {}
 
     def _prune_tombstones(self):
         expired = time.monotonic() - TOMBSTONE_SECONDS
         self.tombstones = {
             key: created for key, created in self.tombstones.items() if created >= expired
+        }
+        self.terminal_failures = {
+            key: error
+            for key, error in self.terminal_failures.items()
+            if key in self.tombstones
         }
 
     def _remember_failure(self, owner):
@@ -655,7 +693,10 @@ class Owners:
         if len(self.tombstones) >= MAX_TOMBSTONES:
             oldest = min(self.tombstones, key=lambda item: self.tombstones[item])
             self.tombstones.pop(oldest, None)
+            self.terminal_failures.pop(oldest, None)
         self.tombstones[owner.retry_key] = time.monotonic()
+        if owner.terminal_error is not None:
+            self.terminal_failures[owner.retry_key] = dict(owner.terminal_error)
 
     def _capacity_used(self):
         return sum(not owner.capacity_released for owner in self.items.values())
@@ -702,6 +743,9 @@ class Owners:
     ):
         self._prune_tombstones()
         if retry_key is not None and retry_key in self.tombstones:
+            terminal = self.terminal_failures.get(retry_key)
+            if terminal is not None:
+                raise _TerminalHTTPError(terminal)
             logger.warning(
                 "bridge replay refused: identical request after an uncertain attempt"
             )
@@ -732,6 +776,8 @@ class Owners:
         owner.touched = time.monotonic()
         if owner.fingerprint == fingerprint:
             if owner.failed and not owner.replayable:
+                if owner.terminal_error is not None:
+                    raise _TerminalHTTPError(owner.terminal_error)
                 logger.warning(
                     "bridge replay refused: identical request after an uncertain attempt"
                 )
@@ -766,6 +812,7 @@ class Owners:
         owner.cleanup_deadline = None
         owner.busy = True
         owner.fingerprint, owner.result, owner.failed = fingerprint, None, False
+        owner.terminal_error = None
         owner.replayable = False
         owner.retry_key = retry_key
         return owner, False
@@ -913,6 +960,10 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.owners = owners
+
+    @app.exception_handler(_TerminalHTTPError)
+    async def terminal_http_error(request, exc):
+        return _error_response(exc.error)
 
     def authenticate(request):
         expected = ("Bearer " + token).encode()
@@ -1106,6 +1157,10 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
             except Exception as exc:
                 uncertain = not _not_delivered(exc)
                 _log_generation_failure(exc, uncertain)
+                terminal = _terminal_error(exc)
+                if terminal is not None:
+                    owner.terminal_error = terminal
+                    return _error_response(terminal)
                 raise HTTPException(
                     502, "Native generation failed or disconnected"
                 ) from None
@@ -1241,9 +1296,13 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
             except Exception as exc:
                 stream_state["uncertain"] = not _not_delivered(exc)
                 _log_generation_failure(exc, stream_state["uncertain"])
+                terminal = _terminal_error(exc)
+                if terminal is not None:
+                    owner.terminal_error = terminal
                 yield _sse(
                     {
-                        "error": {
+                        "error": terminal
+                        or {
                             "message": "Native generation failed or disconnected",
                             "type": "bridge_generation_error",
                             "code": "generation_failed",
