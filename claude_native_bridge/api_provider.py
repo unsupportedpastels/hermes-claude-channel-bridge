@@ -16,6 +16,7 @@ from providers.base import ProviderProfile
 
 from .api_config import TOKEN_ENV, active_home, api_base_url, api_storage
 from .models import MODELS, reasoning_efforts
+from .settings import LOGIN_REFRESH_CONTENTION_CODE, LOGIN_REFRESH_CONTENTION_MESSAGE
 
 OWNER_HEADER = "X-Hermes-Bridge-Client"
 RETRY_LINEAGE_HEADER = "X-Hermes-Bridge-Retry-Lineage"
@@ -169,6 +170,26 @@ def _first_run(home, token):
     return keyfile.read_text(encoding="utf-8").strip(), info["base_url"]
 
 
+def _classify_bridge_error(
+    error, *, status_code, error_code, message, body, model
+):
+    """Fail closed only for the bridge's exact sanitized terminal auth envelope."""
+    envelope = body.get("error", body) if isinstance(body, dict) else None
+    if (
+        isinstance(envelope, dict)
+        and envelope.get("code") == LOGIN_REFRESH_CONTENTION_CODE
+        and envelope.get("type") == "authentication_error"
+        and envelope.get("message") == LOGIN_REFRESH_CONTENTION_MESSAGE
+    ):
+        return {
+            "reason": "auth_permanent",
+            "retryable": False,
+            "should_rotate_credential": False,
+            "should_fallback": False,
+        }
+    return None
+
+
 class ClaudeAPIProfile(ProviderProfile):
     def create_client(self, **kwargs):
         from .api_service import ensure_server
@@ -227,7 +248,7 @@ class ClaudeAPIProfile(ProviderProfile):
 
 
 def make_profile(home=None):
-    return ClaudeAPIProfile(
+    profile = ClaudeAPIProfile(
         name="claude-native-bridge",
         display_name="Claude Native Bridge",
         description="Plugin-owned OpenAI-compatible API backed by native Claude Code.",
@@ -243,6 +264,11 @@ def make_profile(home=None):
         supports_vision=False,
         supports_vision_tool_messages=False,
     )
+    # The installed host exposes this as a dataclass field. Assign after
+    # construction so the same plugin also remains loadable by older hosts
+    # whose ProviderProfile does not accept the keyword yet.
+    profile.classify_api_error = _classify_bridge_error
+    return profile
 
 
 def register():

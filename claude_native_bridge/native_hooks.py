@@ -601,10 +601,24 @@ def capture(runtime, payload):
 
 
 def stopped_text(record, request_id, session_id, prompt_id=None):
+    # This module is launched directly as a script for capture hooks. Keep package
+    # imports out of module initialization; script capture never calls this reader.
+    from .settings import (
+        NATIVE_LOGIN_REFRESH_CONTENTION_TEXT,
+        NativeLoginRefreshContention,
+    )
+
     if record.get("request_id") != request_id or record.get("session_id") != session_id:
         raise ValueError("Uncorrelated native stop event")
     if prompt_id is not None and record.get("prompt_id") != prompt_id:
         raise ValueError("Uncorrelated native stop prompt")
+    if (
+        record.get("event") == "StopFailure"
+        and record.get("error") == "server_error"
+        and record.get("text") == NATIVE_LOGIN_REFRESH_CONTENTION_TEXT
+        and not record.get("background_pending")
+    ):
+        raise NativeLoginRefreshContention()
     if record.get("event") != "Stop" or record.get("background_pending"):
         raise ValueError(
             "Native turn failed or left background work pending: "
