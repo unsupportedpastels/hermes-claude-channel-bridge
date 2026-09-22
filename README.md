@@ -87,10 +87,12 @@ Discovered through `/v1/models`:
 | Claude Sonnet 5 | `claude-sonnet-5` |
 | Claude Opus 4.8 | `claude-opus-4-8` |
 | Claude Opus 5 | `claude-opus-5` |
+| Claude Opus 5.5 | `claude-opus-5-5` |
 | Claude Haiku 4.5 | `claude-haiku-4-5-20251001` |
 | Claude Fable 5.1 | `claude-fable-5-1` |
 
 Availability, consent, authentication, and billing are native Claude responsibilities.
+Opus 5.5 requires Claude Code 2.1.280 or later. Opus 4.8 remains independently selectable; choosing Opus 5.5 does not replace it.
 
 ## Configuration
 

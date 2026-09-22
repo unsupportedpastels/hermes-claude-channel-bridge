@@ -60,7 +60,8 @@ def test_unmodified_host_http_picker_and_session_selection(tmp_path):
         from pathlib import Path
         platform.system()  # Prime Windows platform metadata before process audit.
         TOKEN='fixture-local-api-token-000000000000000000'
-        MODELS=['claude-sonnet-5','claude-opus-4-8','claude-opus-5','claude-haiku-4-5-20251001','claude-fable-5-1']
+        from claude_native_bridge.models import MODELS as CATALOG
+        MODELS=list(CATALOG)
         requests=[]
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
