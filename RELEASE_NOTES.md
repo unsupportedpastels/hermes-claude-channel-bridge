@@ -42,10 +42,12 @@ The configured catalog is exactly:
 - `claude-sonnet-5`
 - `claude-opus-4-8`
 - `claude-opus-5`
+- `claude-opus-5-5`
 - `claude-haiku-4-5-20251001`
 - `claude-fable-5-1`
 
 Catalog presence is not a claim that every entry was live-tested or is available to every native account.
+Opus 5.5 requires Claude Code 2.1.280 or later. Opus 4.8 remains independently selectable.
 
 ## Known limitations
 
