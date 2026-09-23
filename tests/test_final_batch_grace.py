@@ -1,10 +1,11 @@
 """Offline regression: a debounced final display batch must not fail a request.
 
-Claude Code emits display batches through a hook subprocess while the tool call
-that yields the turn travels over its MCP pipe. The pipe wins the race, so the
-journal can still be missing its end-of-message marker when the bridge reads it.
-These tests pin the bounded wait that closes that race, and pin that the wait
-stays bounded and strict when the marker genuinely never arrives.
+Claude Code emits display batches through separate hook subprocesses while the
+tool call that yields the turn travels over its MCP pipe. The pipe can win the
+race, and a later display subprocess can finish before its predecessor, so the
+journal can be incomplete or temporarily out of order when the bridge reads it.
+These tests pin the bounded wait that closes those races, and pin that the wait
+stays bounded and strict when a required batch genuinely never arrives.
 """
 
 import json
@@ -166,6 +167,46 @@ def test_response_before_the_first_display_batch_keeps_the_prose(tmp_path, monke
 
     assert response["kind"] == "tool_calls"
     assert session.last_text == "hello world"
+
+
+def test_final_batch_that_arrives_first_waits_for_its_predecessor(
+    tmp_path, monkeypatch
+):
+    session, _ = session_with_journal(tmp_path, monkeypatch, seed=False)
+    monkeypatch.setattr(session, "_collect_usage", lambda *a, **k: None)
+
+    def append_reordered_batches():
+        time.sleep(0.05)
+        getattr(session, "write_batch")(1, True, "world")
+        time.sleep(0.05)
+        getattr(session, "write_batch")(0, False, "hello ")
+
+    writer = threading.Thread(target=append_reordered_batches)
+    writer.start()
+    try:
+        response = session.exchange("frame", REQUEST_ID)
+    finally:
+        writer.join()
+
+    assert response["kind"] == "tool_calls"
+    assert session.last_text == "hello world"
+
+
+def test_missing_predecessor_still_fails_bounded(tmp_path, monkeypatch):
+    session, _ = session_with_journal(tmp_path, monkeypatch, seed=False)
+    monkeypatch.setattr(session, "_collect_usage", lambda *a, **k: None)
+    timer = threading.Timer(
+        0.05, lambda: getattr(session, "write_batch")(1, True, "world")
+    )
+    timer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(ValueError, match="Missing or out-of-order"):
+            session.exchange("frame", REQUEST_ID)
+    finally:
+        timer.join()
+
+    assert time.monotonic() - started < 5
 
 
 def test_prose_less_yield_commits_empty_under_the_short_bound(tmp_path, monkeypatch):

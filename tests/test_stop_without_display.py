@@ -24,6 +24,7 @@ class StopOnlySession(NativeSession):
 
     instances = []
     mismatch_stop = False
+    display_suffix_only = False
 
     def __init__(self, settings, home, model, effort, **kwargs):
         super().__init__(settings, home, model, effort, **kwargs)
@@ -63,6 +64,20 @@ class StopOnlySession(NativeSession):
             return {"accepted": True}
         if endpoint.startswith("/response?"):
             text = "FIRST_OK" if not self.responses else "SECOND_OK"
+            if self.display_suffix_only:
+                assert capture(
+                    self.runtime,
+                    {
+                        "session_id": self.session_id,
+                        "prompt_id": self.prompt_id,
+                        "turn_id": "turn-" + self.rid,
+                        "message_id": "message-" + self.rid,
+                        "index": 1,
+                        "final": True,
+                        "delta": "_OK",
+                        "hook_event_name": "MessageDisplay",
+                    },
+                )
             if self.mismatch_stop:
                 (self.runtime / "native-stop.json").write_text(
                     json.dumps(
@@ -127,6 +142,24 @@ def test_stop_without_display_completes_exchange_and_session_remains_reusable(tm
         assert emitted == []
         assert not session.closed
     finally:
+        session.close()
+
+
+def test_stop_recovers_complete_text_when_only_a_valid_suffix_batch_arrived(tmp_path):
+    StopOnlySession.instances = []
+    StopOnlySession.display_suffix_only = True
+    session = native_session(tmp_path)
+    emitted = []
+
+    try:
+        response = session.exchange("first", "request-1", on_text=emitted.append)
+
+        assert response["text"] == "FIRST_OK"
+        assert session.responses == ["FIRST_OK"]
+        assert emitted == []
+        assert not session.closed
+    finally:
+        StopOnlySession.display_suffix_only = False
         session.close()
 
 

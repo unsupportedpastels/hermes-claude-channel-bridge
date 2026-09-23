@@ -1,4 +1,5 @@
 import json
+import time
 from typing import ClassVar
 
 import pytest
@@ -7,7 +8,7 @@ from claude_native_bridge.client import NativeBridgeClient, assistant_dict
 from claude_native_bridge.native import NativeSession
 from claude_native_bridge.native_hooks import capture
 from claude_native_bridge.settings import NativeBridgeError, Settings
-from claude_native_bridge.streaming import TextBatches
+from claude_native_bridge.streaming import MAX_BATCHES, TextBatches
 
 
 class ScriptedSession(NativeSession):
@@ -290,7 +291,6 @@ def test_order_dedup_and_reconcile():
 @pytest.mark.parametrize(
     "change",
     [
-        {"index": 1},
         {"session_id": "other"},
         {"request_id": "old"},
         {"index": True},
@@ -321,6 +321,43 @@ def test_conflict_missing_final_and_turn_fail():
     with pytest.raises(ValueError):
         stream.finish("different")
     assert stream.finish() == "Hello"  # pre-tool text, not a Stop
+
+
+@pytest.mark.parametrize(
+    ("later_index", "trailing_final"),
+    [(1, True), (1, False), (2, True), (2, False)],
+)
+def test_reordered_batches_after_a_final_marker_fail_before_emission(
+    later_index, trailing_final
+):
+    emitted = []
+    stream = TextBatches("s", "r", emitted.append)
+    stream.add(batch(later_index, "AFTER", trailing_final))
+
+    with pytest.raises(ValueError, match="Missing or out-of-order"):
+        stream.add(batch(0, "END", True))
+
+    assert emitted == []
+
+
+def test_descending_batches_at_the_limit_are_processed_linearly():
+    stream = TextBatches("s", "r")
+    started = time.monotonic()
+
+    for index in range(MAX_BATCHES - 1, -1, -1):
+        stream.add(batch(index, "", index == MAX_BATCHES - 1))
+
+    elapsed = time.monotonic() - started
+    assert stream.finish() == ""
+    assert elapsed < 2.0
+
+
+def test_authoritative_final_rejects_an_unmatched_pending_suffix():
+    stream = TextBatches("s", "r")
+    stream.add(batch(1, "WRONG", True))
+
+    with pytest.raises(ValueError, match="conflicts with captured batches"):
+        stream.finish("FIRST_OK")
 
 
 def test_authoritative_final_without_display_batches_is_returned_as_fallback():
