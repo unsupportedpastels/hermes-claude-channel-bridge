@@ -1,4 +1,5 @@
 import json
+import time
 from typing import ClassVar
 
 import pytest
@@ -7,7 +8,7 @@ from claude_native_bridge.client import NativeBridgeClient, assistant_dict
 from claude_native_bridge.native import NativeSession
 from claude_native_bridge.native_hooks import capture
 from claude_native_bridge.settings import NativeBridgeError, Settings
-from claude_native_bridge.streaming import TextBatches
+from claude_native_bridge.streaming import MAX_BATCHES, TextBatches
 
 
 class ScriptedSession(NativeSession):
@@ -337,6 +338,18 @@ def test_reordered_batches_after_a_final_marker_fail_before_emission(
         stream.add(batch(0, "END", True))
 
     assert emitted == []
+
+
+def test_descending_batches_at_the_limit_are_processed_linearly():
+    stream = TextBatches("s", "r")
+    started = time.monotonic()
+
+    for index in range(MAX_BATCHES - 1, -1, -1):
+        stream.add(batch(index, "", index == MAX_BATCHES - 1))
+
+    elapsed = time.monotonic() - started
+    assert stream.finish() == ""
+    assert elapsed < 2.0
 
 
 def test_authoritative_final_rejects_an_unmatched_pending_suffix():

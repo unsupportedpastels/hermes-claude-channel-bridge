@@ -24,6 +24,8 @@ class TextBatches:
         self.turn_id = None
         self.messages = {}
         self.pending = {}
+        self.pending_final_index = {}
+        self.pending_max_index = {}
         self.parts = []
         self.bytes = 0
         self.count = 0
@@ -77,6 +79,12 @@ class TextBatches:
             if pending[index] != item:
                 raise ValueError("Conflicting duplicate native text batch")
             return
+        terminal = self.pending_final_index.get(message)
+        maximum = self.pending_max_index.get(message, -1)
+        if terminal is not None and (index > terminal or (final and index != terminal)):
+            raise ValueError("Missing or out-of-order native text batch")
+        if final and maximum > index:
+            raise ValueError("Missing or out-of-order native text batch")
         if any(
             (values and not values[-1][1]) or self.pending.get(key)
             for key, values in self.messages.items()
@@ -88,15 +96,9 @@ class TextBatches:
         if self.bytes > MAX_TEXT_BYTES or self.count > MAX_BATCHES:
             raise ValueError("Native text limit exceeded")
         pending[index] = item
-        final_indices = [
-            pending_index
-            for pending_index, (_, pending_final) in pending.items()
-            if pending_final
-        ]
-        if final_indices and any(
-            pending_index > min(final_indices) for pending_index in pending
-        ):
-            raise ValueError("Missing or out-of-order native text batch")
+        self.pending_max_index[message] = max(maximum, index)
+        if final:
+            self.pending_final_index[message] = index
         ready = []
         cursor = len(batches)
         while cursor in pending:
@@ -110,6 +112,8 @@ class TextBatches:
                 self.on_text(next_delta)
         if not pending:
             self.pending.pop(message, None)
+            self.pending_final_index.pop(message, None)
+            self.pending_max_index.pop(message, None)
 
     def drain(self, runtime):
         if (runtime / "native-attribution-error").exists():
