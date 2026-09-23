@@ -23,6 +23,7 @@ class TextBatches:
         self.prompt_id = expected_prompt_id
         self.turn_id = None
         self.messages = {}
+        self.pending = {}
         self.parts = []
         self.bytes = 0
         self.count = 0
@@ -69,10 +70,15 @@ class TextBatches:
             if batches[index] != item:
                 raise ValueError("Conflicting duplicate native text batch")
             return
-        if index != len(batches) or (batches and batches[-1][1]):
+        if index >= MAX_BATCHES or (batches and batches[-1][1]):
             raise ValueError("Missing or out-of-order native text batch")
+        pending = self.pending.setdefault(message, {})
+        if index in pending:
+            if pending[index] != item:
+                raise ValueError("Conflicting duplicate native text batch")
+            return
         if any(
-            values and not values[-1][1]
+            (values and not values[-1][1]) or self.pending.get(key)
             for key, values in self.messages.items()
             if key != message
         ):
@@ -81,10 +87,29 @@ class TextBatches:
         self.count += 1
         if self.bytes > MAX_TEXT_BYTES or self.count > MAX_BATCHES:
             raise ValueError("Native text limit exceeded")
-        batches.append(item)
-        self.parts.append(delta)
-        if delta and self.on_text:
-            self.on_text(delta)
+        pending[index] = item
+        final_indices = [
+            pending_index
+            for pending_index, (_, pending_final) in pending.items()
+            if pending_final
+        ]
+        if final_indices and any(
+            pending_index > min(final_indices) for pending_index in pending
+        ):
+            raise ValueError("Missing or out-of-order native text batch")
+        ready = []
+        cursor = len(batches)
+        while cursor in pending:
+            ready.append(pending[cursor])
+            cursor += 1
+        for next_delta, next_final in ready:
+            pending.pop(len(batches))
+            batches.append((next_delta, next_final))
+            self.parts.append(next_delta)
+            if next_delta and self.on_text:
+                self.on_text(next_delta)
+        if not pending:
+            self.pending.pop(message, None)
 
     def drain(self, runtime):
         if (runtime / "native-attribution-error").exists():
@@ -118,7 +143,7 @@ class TextBatches:
         separate process), so callers that have no authoritative text of their
         own may wait briefly before committing an empty message.
         """
-        return not self.messages
+        return not any(self.messages.values())
 
     def awaiting_final(self):
         """True while this journal may still be missing its end-of-message marker.
@@ -127,13 +152,35 @@ class TextBatches:
         trailing line) both leave the record incomplete for now, so the caller
         may wait briefly before deciding the journal is final.
         """
-        return self.partial or any(
-            not values or not values[-1][1] for values in self.messages.values()
+        return (
+            self.partial
+            or bool(self.pending)
+            or any(not values or not values[-1][1] for values in self.messages.values())
         )
 
     def finish(self, final_text=None):
         if self.partial:
             raise ValueError("Incomplete native text journal record")
+        if self.pending:
+            if final_text is None or self.parts or len(self.pending) != 1:
+                raise ValueError("Missing or out-of-order native text batch")
+            pending = next(iter(self.pending.values()))
+            indices = sorted(pending)
+            if (
+                not indices
+                or indices[0] <= 0
+                or indices != list(range(indices[0], indices[-1] + 1))
+            ):
+                raise ValueError("Missing or out-of-order native text batch")
+            held = [pending[index] for index in indices]
+            if any(final for _, final in held[:-1]) or not held[-1][1]:
+                raise ValueError("Missing or out-of-order native text batch")
+            suffix = "".join(delta for delta, _ in held).rstrip()
+            if suffix and not final_text.rstrip().endswith(suffix):
+                raise ValueError("Native final text conflicts with captured batches")
+            # Stop is authoritative and no text reached Hermes. Returning its full
+            # text is safer than emitting a suffix whose predecessor never landed.
+            return final_text
         if any(not values or not values[-1][1] for values in self.messages.values()):
             raise ValueError("Missing final native text batch")
         text = "".join(self.parts)
