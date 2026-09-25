@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import socket
 import subprocess
 import sys
 import time
@@ -87,6 +88,15 @@ def _health(port, token):
     return _service_state(port, token) == "ok"
 
 
+def _port_in_use(port):
+    """True when something already accepts connections on the loopback port."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
 def _wait_for_release(port, token):
     """A draining service still owns its port; wait for it instead of racing it."""
     deadline = time.monotonic() + DRAIN_WAIT_SECONDS
@@ -145,6 +155,15 @@ def ensure_server(home, token, *, port=None, prepare_runtime=None):
             }
         if state == "draining":
             _wait_for_release(candidate, token)
+        if desired and _port_in_use(desired):
+            # Not our service with this credential: typically the bridge of
+            # another Hermes home configured with the same port. Launching
+            # would only fail to bind after writing this home's state.
+            raise RuntimeError(
+                f"Local API port {desired} is already in use by another process "
+                "(possibly the bridge of another Hermes home); give this home its "
+                "own claude_native_bridge_api.port or use the home that owns it"
+            )
         keyfile = root / "token"
         if keyfile.exists() and not secrets.compare_digest(
             keyfile.read_text().strip(), token

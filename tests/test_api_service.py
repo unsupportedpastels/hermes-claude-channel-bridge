@@ -124,6 +124,26 @@ def test_unready_runtime_is_reported_and_nothing_is_launched(tmp_path, launches)
     assert launches == []
 
 
+def test_port_owned_by_another_process_is_reported_without_side_effects(
+    tmp_path, launches
+):
+    import socket
+
+    with socket.socket() as other:
+        other.bind(("127.0.0.1", 0))
+        other.listen()
+        port = other.getsockname()[1]
+        with pytest.raises(RuntimeError, match=f"port {port} is already in use"):
+            api_service.ensure_server(
+                tmp_path,
+                TOKEN,
+                port=port,
+                prepare_runtime=lambda: pytest.fail("must not prepare a runtime"),
+            )
+    assert launches == []
+    assert not (api_storage(tmp_path) / "token").exists()
+
+
 def test_stop_prefers_graceful_shutdown_over_termination(tmp_path, monkeypatch):
     root = api_storage(tmp_path)
     root.mkdir(parents=True)
