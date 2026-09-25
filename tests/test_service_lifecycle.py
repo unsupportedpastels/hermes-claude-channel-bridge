@@ -27,15 +27,46 @@ def _activity(idle=60):
     return activity, now, alive
 
 
-def test_retires_only_after_idle_period_with_no_live_client():
+def test_retires_only_after_idle_period_with_no_open_client():
     activity, now, alive = _activity()
-    activity.note_client("100:5.0")
+    activity.note_client("100:5.0", "owner-a")
     alive[(100, 5.0)] = True
     now[0] = 59
     assert not activity.should_retire(False)
     now[0] = 61
-    assert not activity.should_retire(False), "a live client keeps the service"
+    assert not activity.should_retire(False), "an open client keeps the service"
     alive[(100, 5.0)] = False
+    assert activity.should_retire(False)
+
+
+def test_live_process_without_open_client_does_not_pin_the_service():
+    activity, now, alive = _activity()
+    alive[(100, 5.0)] = True
+    activity.note_client("100:5.0")  # health probe with no client
+    now[0] = 61
+    assert activity.should_retire(False)
+
+
+def test_closing_the_last_client_releases_its_process():
+    activity, now, alive = _activity()
+    alive[(100, 5.0)] = True
+    activity.note_client("100:5.0", "owner-a")
+    activity.note_client("100:5.0", "owner-b")
+    now[0] = 61
+    activity.release_client("100:5.0", "owner-a")
+    assert not activity.should_retire(False), "owner-b is still open"
+    activity.release_client("100:5.0", "owner-b")
+    assert activity.should_retire(False)
+
+
+def test_release_from_a_different_identity_is_ignored_and_reuse_resets():
+    activity, now, alive = _activity()
+    alive[(100, 5.0)] = alive[(100, 9.0)] = True
+    activity.note_client("100:5.0", "owner-a")
+    activity.release_client("100:9.0", "owner-a")
+    assert activity.open == {100: {"owner-a"}}
+    activity.note_client("100:9.0")  # reused PID: the old process's clients are gone
+    now[0] = 61
     assert activity.should_retire(False)
 
 
@@ -106,6 +137,22 @@ def test_only_authenticated_requests_register_a_client_process():
 
     asyncio.run(run())
     assert os.getpid() in app.state.activity.clients
+
+
+def test_client_is_open_from_creation_probe_until_owner_close():
+    app = _app()
+    process = {"X-Hermes-Bridge-Process": f"{os.getpid()}:{psutil.Process().create_time()!r}"}
+    owner = {"X-Hermes-Bridge-Client": "owner-a"}
+
+    async def run():
+        async with await _client(app) as client:
+            await client.get("/health", headers={**AUTH, **process, **owner})
+            assert app.state.activity.open == {os.getpid(): {"owner-a"}}
+            closed = await client.post("/v1/owner/close", headers={**AUTH, **process, **owner})
+            assert closed.status_code == 200
+            assert app.state.activity.open == {}
+
+    asyncio.run(run())
 
 
 def test_shutdown_drains_refuses_new_work_then_exits():

@@ -87,7 +87,7 @@ class _FailingLaunch:
 def launches(monkeypatch):
     _FailingLaunch.calls = []
     monkeypatch.setattr(api_service.subprocess, "Popen", _FailingLaunch)
-    monkeypatch.setattr(api_service, "_service_state", lambda port, token: None)
+    monkeypatch.setattr(api_service, "_service_state", lambda port, token, client=None: None)
     return _FailingLaunch.calls
 
 

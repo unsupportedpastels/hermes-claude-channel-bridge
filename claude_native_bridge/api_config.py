@@ -7,6 +7,7 @@ TOKEN_ENV = "CLAUDE_NATIVE_BRIDGE_API_KEY"
 DEFAULT_PORT = 18991
 DEFAULT_IDLE_EXIT_SECONDS = 300
 PROCESS_HEADER = "X-Hermes-Bridge-Process"
+CLIENT_HEADER = "X-Hermes-Bridge-Client"
 _identity: dict[int, str] = {}
 
 

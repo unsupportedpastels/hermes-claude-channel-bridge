@@ -16,6 +16,7 @@ import yaml
 import psutil
 
 from .api_config import (
+    CLIENT_HEADER,
     PROCESS_HEADER,
     TOKEN_ENV,
     api_storage,
@@ -59,19 +60,16 @@ def _write_private(path, content):
         stream.write(content)
 
 
-def _service_state(port, token):
-    """``"ok"``, ``"draining"`` or None; also registers this process as a client."""
+def _service_state(port, token, client=None):
+    """``"ok"``, ``"draining"`` or None; ``client`` registers an open bridge client."""
     if type(port) is not int or not 1 <= port <= 65535:
         return None
+    headers = {"Authorization": "Bearer " + token, PROCESS_HEADER: process_identity()}
+    if client:
+        headers[CLIENT_HEADER] = client
     try:
-        with httpx.Client(trust_env=False, timeout=0.4) as client:
-            response = client.get(
-                f"http://127.0.0.1:{port}/health",
-                headers={
-                    "Authorization": "Bearer " + token,
-                    PROCESS_HEADER: process_identity(),
-                },
-            )
+        with httpx.Client(trust_env=False, timeout=0.4) as http:
+            response = http.get(f"http://127.0.0.1:{port}/health", headers=headers)
         body = response.json()
     except (httpx.HTTPError, ValueError):
         return None
@@ -84,8 +82,8 @@ def _service_state(port, token):
     return None
 
 
-def _health(port, token):
-    return _service_state(port, token) == "ok"
+def _health(port, token, client=None):
+    return _service_state(port, token, client) == "ok"
 
 
 def _port_in_use(port):
@@ -127,11 +125,13 @@ def _startup_failure(log, offset, status):
     )
 
 
-def ensure_server(home, token, *, port=None, prepare_runtime=None):
+def ensure_server(home, token, *, port=None, prepare_runtime=None, client=None):
     """Start/reuse only our authenticated API; no native model is launched here.
 
     ``prepare_runtime`` returns the server interpreter and runs only when a
     launch is needed; by default an unready runtime is reported, not built.
+    ``client`` is the bridge client being created; the service counts it as
+    open until that client closes.
     """
     if not isinstance(token, str) or len(token) < 32 or any(c.isspace() for c in token):
         raise ValueError(
@@ -146,7 +146,7 @@ def ensure_server(home, token, *, port=None, prepare_runtime=None):
     with FileLock(str(root / "server.lock"), timeout=20):
         previous = json.loads(ready.read_text()) if ready.exists() else {}
         candidate = desired or previous.get("port")
-        state = _service_state(candidate, token) if candidate else None
+        state = _service_state(candidate, token, client) if candidate else None
         if state == "ok":
             return {
                 **(previous if not desired else {"pid": previous.get("pid")}),
@@ -215,7 +215,7 @@ def ensure_server(home, token, *, port=None, prepare_runtime=None):
                     if (
                         service is not None
                         and actual_argv[1:] == argv[1:]
-                        and _health(info.get("port"), token)
+                        and _health(info.get("port"), token, client)
                     ):
                         _write_private(
                             root / "manager.json",

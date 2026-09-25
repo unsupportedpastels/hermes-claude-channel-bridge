@@ -126,6 +126,7 @@ def _bridge_openai():
                         "Authorization": "Bearer " + self._bridge_token,
                         OWNER_HEADER: self._bridge_owner,
                         RETRY_LINEAGE_HEADER: self._bridge_lineage,
+                        PROCESS_HEADER: process_identity(),
                     },
                 )
                 try:
@@ -258,11 +259,13 @@ class ClaudeAPIProfile(ProviderProfile):
         # The server runtime is the plugin's own environment, so building it
         # cannot change Hermes's dependencies; it still needs recorded consent.
         consent = _consent_recorded(home)
+        owner = str(uuid.uuid4())
         ensure_server(
             home,
             token,
             port=parsed.port or 80,
             prepare_runtime=lambda: ensure_ready(home, allow_provision=consent),
+            client=owner,
         )
         from openai import OpenAI
 
@@ -271,7 +274,6 @@ class ClaudeAPIProfile(ProviderProfile):
         inherited_headers = arguments.get("default_headers")
         headers = dict(inherited_headers or {})
         headers[RETRY_LINEAGE_HEADER] = _retry_lineage(inherited_headers)
-        owner = str(uuid.uuid4())
         headers[OWNER_HEADER] = owner
         arguments.update(api_key=token, base_url=base_url, default_headers=headers)
         return _bridge_openai()(

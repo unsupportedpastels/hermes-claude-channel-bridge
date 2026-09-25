@@ -1056,7 +1056,10 @@ def create_app(
             raise HTTPException(
                 401, "Invalid bridge credential", headers={"WWW-Authenticate": "Bearer"}
             )
-        activity.note_client(request.headers.get("x-hermes-bridge-process"))
+        activity.note_client(
+            request.headers.get("x-hermes-bridge-process"),
+            request.headers.get("x-hermes-bridge-client"),
+        )
 
     @app.get("/health")
     async def health(request: Request):
@@ -1110,6 +1113,8 @@ def create_app(
         key = request.headers.get("x-hermes-bridge-client", "")
         if not key or len(key) > 512:
             raise HTTPException(400, "Invalid owner identifier")
+        # A closed client no longer keeps its process counted as a live user.
+        activity.release_client(request.headers.get("x-hermes-bridge-process"), key)
         lineage = _canonical_uuid(
             request.headers.get("x-hermes-bridge-retry-lineage", "")
         )
