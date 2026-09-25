@@ -70,6 +70,18 @@ def test_release_from_a_different_identity_is_ignored_and_reuse_resets():
     assert activity.should_retire(False)
 
 
+def test_exited_process_hands_its_open_clients_to_the_reaper_once():
+    activity, _, alive = _activity()
+    alive[(100, 5.0)] = alive[(200, 5.0)] = True
+    activity.note_client("100:5.0", "owner-a")
+    activity.note_client("200:5.0", "owner-b")
+    assert activity.take_orphaned() == set()
+    alive[(100, 5.0)] = False
+    assert activity.take_orphaned() == {"owner-a"}
+    assert activity.take_orphaned() == set()
+    assert activity.open == {200: {"owner-b"}}
+
+
 def test_in_flight_requests_and_busy_owners_block_retirement():
     activity, now, _ = _activity()
     activity.enter()

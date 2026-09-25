@@ -167,6 +167,25 @@ def test_explicit_owner_close_releases_native_and_is_idempotent(tmp_path):
         assert client.post("/v1/owner/close", headers=HEADERS).json() == {"closed": False}
 
 
+def test_owners_left_open_by_an_exited_process_are_released(tmp_path):
+    app, engines = app_factory(tmp_path)
+    owner_b = dict(HEADERS, **{"X-Hermes-Bridge-Client": "owner-b"})
+    logical = dict(
+        HEADERS,
+        **{
+            "X-Hermes-Bridge-Client": "owner-c",
+            "X-Hermes-Bridge-Retry-Lineage": "6f1c2a52-3a52-4f55-9a8e-0d6f4b1e5c11",
+        },
+    )
+    with TestClient(app) as client:
+        for headers in (HEADERS, owner_b, logical):
+            assert client.post("/v1/chat/completions", headers=headers, json=BODY).status_code == 200
+        assert len(engines) == 3
+        client.portal.call(app.state.owners.release_leases, {"owner-a", "owner-c"})
+        assert engines[0].closed.is_set() and engines[2].closed.is_set()
+        assert not engines[1].closed.is_set(), "another process's owner stays"
+
+
 def test_configured_owner_capacity_is_global_and_close_frees_slot(tmp_path):
     app, engines = app_factory(tmp_path, owner_limit=1)
     owner_b = dict(HEADERS, **{"X-Hermes-Bridge-Client": "owner-b"})

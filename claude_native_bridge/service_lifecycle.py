@@ -57,6 +57,8 @@ class ServiceActivity:
         self._alive = alive
         self.clients: dict[int, float] = {}
         self.open: dict[int, set[str]] = {}
+        # Clients left open by processes that exited without closing them.
+        self.orphaned: set[str] = set()
         self.inflight = 0
         self.last = clock()
         self.draining = False
@@ -71,7 +73,8 @@ class ServiceActivity:
             if len(self.clients) >= MAX_CLIENTS:
                 return
         if self.clients.get(pid) != created:
-            self.open.pop(pid, None)  # A reused PID replaces the dead identity.
+            # A reused PID replaces the dead identity and orphans its clients.
+            self.orphaned |= self.open.pop(pid, set())
         self.clients[pid] = created
         if isinstance(owner, str) and 0 < len(owner) <= MAX_OWNER_LENGTH:
             owned = self.open.setdefault(pid, set())
@@ -100,7 +103,13 @@ class ServiceActivity:
         for pid, created in list(self.clients.items()):
             if not self._alive(pid, created):
                 del self.clients[pid]
-                self.open.pop(pid, None)
+                self.orphaned |= self.open.pop(pid, set())
+
+    def take_orphaned(self):
+        """Return, once, the clients whose process exited without closing them."""
+        self.prune()
+        orphaned, self.orphaned = self.orphaned, set()
+        return orphaned
 
     def should_retire(self, busy_owners):
         if self.draining or not self.idle_seconds:

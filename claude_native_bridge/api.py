@@ -919,6 +919,25 @@ class Owners:
             await asyncio.gather(*releases)
         return matched
 
+    async def release_leases(self, leases):
+        """Release owners left open by a Hermes process that exited."""
+        releases = []
+        for key, owner in list(self.items.items()):
+            if owner.removal_requested or owner.busy:
+                continue  # A busy owner's disconnected request settles it.
+            if key in leases:
+                owner.lease_refs.clear()
+            elif owner.lease_refs & leases:
+                owner.lease_refs -= leases
+                if owner.lease_refs:
+                    continue
+            else:
+                continue
+            self._start_release(key, owner)
+            releases.append(self._bounded_release(owner))
+        if releases:
+            await asyncio.gather(*releases)
+
     async def shutdown(self):
         owners = list(self.items.items())
         for key, owner in owners:
@@ -1018,6 +1037,9 @@ def create_app(
         async def reaper():
             while True:
                 await asyncio.sleep(min(30, OWNER_IDLE_SECONDS))
+                orphaned = activity.take_orphaned()
+                if orphaned:
+                    await owners.release_leases(orphaned)
                 await owners.prune()
 
         async def idle_monitor():
