@@ -46,9 +46,9 @@ class APIConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder)
             (home / "config.yaml").write_text(
-                "claude_native_bridge:\n  max_sessions: 6\n"
+                "claude_native_bridge:\n  max_sessions: 10\n"
             )
-            self.assertEqual(configured_owner_limit(home), 6)
+            self.assertEqual(configured_owner_limit(home), 10)
 
 
 if __name__ == "__main__":

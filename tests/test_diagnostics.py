@@ -174,7 +174,8 @@ def test_python_version_must_satisfy_the_declared_range(tmp_path, monkeypatch):
         ((3, 10, 9), "fail"),
         ((3, 11, 0), "pass"),
         ((3, 13, 9), "pass"),
-        ((3, 14, 0), "fail"),
+        ((3, 14, 0), "pass"),
+        ((3, 15, 0), "pass"),
     ):
         monkeypatch.setattr(
             diagnostics, "_current_python_version", lambda version=version: version
@@ -188,7 +189,7 @@ def test_python_version_must_satisfy_the_declared_range(tmp_path, monkeypatch):
         )
         python = next(c for c in report["checks"] if c["id"] == "python")
         assert python["status"] == expected_status
-        assert python["detail"] == "Python >=3.11,<3.14 is required."
+        assert python["detail"] == "Python >=3.11 is required."
 
 
 def test_missing_channel_dependencies_are_reported(tmp_path):

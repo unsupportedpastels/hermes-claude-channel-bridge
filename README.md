@@ -19,8 +19,8 @@ No Hermes core patch, print-mode inference, Agent SDK inference, copied Anthropi
 
 ## Requirements
 
-- Python **>=3.11,<3.14** in a writable virtual environment (the one Hermes runs)
-- Node **>=22,<23** with `npm` on PATH
+- Python **>=3.11** in a writable virtual environment (the one Hermes runs)
+- Node **>=22** with `npm` on PATH
 - Native Claude Code, signed in with `claude auth login`
 - `tmux` on Linux/macOS (Windows uses ConPTY)
 
@@ -102,7 +102,8 @@ All keys live under `claude_native_bridge` in Hermes `config.yaml`.
 - `rotation_percentage` (default 80), `rotation_headroom_tokens`, `rotation_max_tokens`: when Claude's own context counters reach the threshold between turns, the native session is retired and rebuilt from Hermes history within `bootstrap_max_chars`. Without counters, `rotation_fallback_chars` bounds the session instead.
 - `native_auto_compact` (default `false`): opt back into Claude's automatic compaction. Unverified as a recovery path.
 - `retain_diagnostics` (default `false`): keep each native session's private run directory (request-window state, driver markers, spooled results) after teardown, for offline diagnosis.
-- `channel_diagnostics` (default `false`): pass `HERMES_BRIDGE_DIAGNOSTICS=1` to the channel server so its sequence/branch lines are appended to `channel-diagnostics.log` inside that session's private runtime directory (IDs, labels and process metadata only, never request content). Nothing is written to the channel's stderr, because a native CLI persists an MCP server's stderr in its own log outside the private runtime; combine with `retain_diagnostics` to keep the file after teardown.
+- A private, always-on metadata journal lives at `<Hermes home>/claude-native-bridge/api/events.jsonl`. It rotates at 1 MiB with three backups (up to 4 MiB total). Events identify admission failures, generation start/completion/failure, error class, fixed reason code, an opaque run directory, and a short trace linking API and native failures. It never records prompts, tool arguments, bearer tokens, or arbitrary exception text. Use `events.jsonl`, then `.1` through `.3` for older entries.
+- `channel_diagnostics` (default `false`): pass `HERMES_BRIDGE_DIAGNOSTICS=1` to the channel server. Each session's private `channel-diagnostics.log` rotates at 128 KiB with two backups. It records sequence/branch metadata and rejected simple tool names, never request content or tool arguments. Nothing is written to channel stderr, which Claude may persist outside the private runtime. Combine with `retain_diagnostics` to keep these per-session files after teardown; **retained run directories themselves are not rolled**.
 
 To route Hermes subagents through the bridge:
 

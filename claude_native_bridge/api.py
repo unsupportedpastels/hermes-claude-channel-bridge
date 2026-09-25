@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from .event_log import event_trace, failure_reason, record_event, safe_error_type
 from .models import MODELS
 from .protocol import _choice, _messages, _tool_definitions, _validate_arguments
 from .settings import (
@@ -522,12 +523,21 @@ class _TerminalHTTPError(Exception):
         self.error = error
 
 
-def _log_generation_failure(exc, uncertain):
+def _log_generation_failure(exc, uncertain, *, trace, stream, started):
     """Bounded failure evidence: class names and our own branch label only."""
     logger.warning(
         "bridge generation %s: %s",
         "uncertain" if uncertain else "not_delivered",
         type(exc).__name__,
+    )
+    record_event(
+        "generation_failed",
+        trace=trace,
+        stream=stream,
+        branch="uncertain" if uncertain else "not_delivered",
+        error_type=safe_error_type(exc),
+        reason=failure_reason(exc),
+        duration_ms=int((time.monotonic() - started) * 1000),
     )
 
 
@@ -749,6 +759,7 @@ class Owners:
             logger.warning(
                 "bridge replay refused: identical request after an uncertain attempt"
             )
+            record_event("admission_rejected", reason="replay")
             raise HTTPException(
                 502, "Previous identical request failed; automatic replay refused"
             )
@@ -760,12 +771,14 @@ class Owners:
             or (owner.release_task is not None and not owner.release_task.done())
             or (owner.cleanup_started and not owner.cleanup_completed)
         ):
+            record_event("admission_rejected", reason="owner_busy")
             raise HTTPException(
                 409, "Owner already has an active request; no inference started"
             )
         created = owner is None
         if created:
             if self._capacity_used() >= self.limit:
+                record_event("admission_rejected", reason="capacity", count=self._capacity_used(), capacity=self.limit)
                 raise HTTPException(429, "Bridge owner capacity reached")
             owner = Owner(None, ephemeral=ephemeral)
             self.items[key] = owner
@@ -781,6 +794,7 @@ class Owners:
                 logger.warning(
                     "bridge replay refused: identical request after an uncertain attempt"
                 )
+                record_event("admission_rejected", reason="replay")
                 raise HTTPException(
                     502, "Previous identical request failed; automatic replay refused"
                 )
@@ -793,6 +807,7 @@ class Owners:
                 owner.busy = True
                 return owner, True
         if owner.capacity_released and self._capacity_used() >= self.limit:
+            record_event("admission_rejected", reason="capacity", count=self._capacity_used(), capacity=self.limit)
             raise HTTPException(429, "Bridge owner capacity reached")
         if owner.engine is None:
             try:
@@ -800,6 +815,7 @@ class Owners:
             except Exception:
                 if created:
                     self.items.pop(key, None)
+                record_event("admission_rejected", reason="engine_unavailable")
                 raise HTTPException(503, "Bridge engine unavailable") from None
             owner.engine = engine
         owner.close_task = None
@@ -1088,6 +1104,22 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
             lease_refs=lease_refs,
         )
         streaming = body.get("stream", False)
+        trace = uuid.uuid4().hex[:12]
+        started = time.monotonic()
+        record_event(
+            "generation_started", trace=trace, stream=streaming,
+            cached=cached, count=owners._capacity_used(), capacity=owners.limit,
+        )
+
+        def log_completion(result):
+            choice = result["choices"][0]
+            record_event(
+                "generation_completed", trace=trace, stream=streaming,
+                cached=cached, finish=choice["finish_reason"],
+                tool_count=len(choice["message"]["tool_calls"] or []),
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+
         events = queue.Queue(maxsize=1024)
         text_size = 0
 
@@ -1119,9 +1151,10 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
             )
             if streaming:
                 kwargs["_on_text"] = on_text
-            result = await asyncio.to_thread(
-                owner.engine.chat.completions.create, **kwargs
-            )
+            with event_trace(trace):
+                result = await asyncio.to_thread(
+                    owner.engine.chat.completions.create, **kwargs
+                )
             if inspect.isawaitable(result):
                 result = await result
             return _completion(result, body)
@@ -1129,6 +1162,7 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
         if cached:
             if not streaming:
                 owner.busy = False
+                log_completion(owner.result)
                 return JSONResponse(owner.result)
         else:
             owner.task = asyncio.create_task(invoke())
@@ -1151,12 +1185,13 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
                 await check()
                 result = await task
                 owner.result, success = result, True
+                log_completion(result)
                 return JSONResponse(result)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 uncertain = not _not_delivered(exc)
-                _log_generation_failure(exc, uncertain)
+                _log_generation_failure(exc, uncertain, trace=trace, stream=streaming, started=started)
                 terminal = _terminal_error(exc)
                 if terminal is not None:
                     owner.terminal_error = terminal
@@ -1291,11 +1326,12 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
                     result["id"], result["created"] = stream_id, created
                     owner.result = result
                 stream_state["success"] = True
+                log_completion(result)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 stream_state["uncertain"] = not _not_delivered(exc)
-                _log_generation_failure(exc, stream_state["uncertain"])
+                _log_generation_failure(exc, stream_state["uncertain"], trace=trace, stream=streaming, started=started)
                 terminal = _terminal_error(exc)
                 if terminal is not None:
                     owner.terminal_error = terminal

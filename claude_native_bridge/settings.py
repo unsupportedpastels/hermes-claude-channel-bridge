@@ -91,8 +91,8 @@ class Settings:
                 or n <= 0
             ):
                 raise NativeBridgeError(name + " must be a finite positive number")
-        if type(value.max_sessions) is not int or not 1 <= value.max_sessions <= 8:
-            raise NativeBridgeError("max_sessions must be an integer from 1 to 8")
+        if type(value.max_sessions) is not int or not 1 <= value.max_sessions <= 10:
+            raise NativeBridgeError("max_sessions must be an integer from 1 to 10")
         if type(value.page_threshold) is not int or value.page_threshold <= 0:
             raise NativeBridgeError("page_threshold must be a positive integer")
         if (

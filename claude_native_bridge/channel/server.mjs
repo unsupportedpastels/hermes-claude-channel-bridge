@@ -4,6 +4,7 @@ import {Server} from '@modelcontextprotocol/sdk/server/index.js';
 import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {CallToolRequestSchema, ListToolsRequestSchema, McpError, ErrorCode} from '@modelcontextprotocol/sdk/types.js';
 import {Bridge, BridgeError, MAX_BYTES, RESPOND_SCHEMA} from './protocol.mjs';
+import {appendDiagnostic} from './diagnostic-log.mjs';
 import {createHttpServer} from './http.mjs';
 import {readTransport} from './platform.mjs';
 
@@ -44,7 +45,7 @@ const log = (event, metadata = {}) => {
   const dir = process.env.HERMES_BRIDGE_RUNTIME_DIR;
   if (!dir) return;
   try {
-    fs.appendFileSync(path.join(dir, 'channel-diagnostics.log'), JSON.stringify({time: new Date().toISOString(), event, ...metadata}) + '\n');
+    appendDiagnostic(dir, event, metadata);
   } catch {}
 };
 
@@ -107,6 +108,9 @@ try {
       log('decision', {sequence: bridge.sequence, kind: request.params.arguments.kind});
       return {content: [{type: 'text', text: JSON.stringify(await pending)}]};
     } catch (error) {
+      if (error instanceof BridgeError && error.diagnostic) {
+        log('proposal_rejected', {sequence: bridge.sequence, ...error.diagnostic});
+      }
       throw new McpError(error instanceof BridgeError && error.status < 500 ? ErrorCode.InvalidParams : ErrorCode.InternalError,
         error instanceof BridgeError ? error.message : 'Bridge response failed');
     }

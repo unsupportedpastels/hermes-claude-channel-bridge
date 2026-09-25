@@ -8,5 +8,5 @@ Build a standalone experimental Hermes model-provider plugin. Do not modify Herm
 - Native sessions are bounded, cancelable and cleaned up; no native process startup at plugin discovery. Development-channel consent must be explicit before live use.
 - Runtime state, transcripts, account details and test receipts belong only under Git-ignored `.private/` or system temporary directories. Never include secrets in source/manifests/logs.
 - Use focused RED/GREEN for deterministic protocol/lifecycle behavior. Offline tests first, then bounded real Hermes integration with temporary memory/skill stores. Test results must distinguish mocks from native execution.
-- Python dependencies have bounded versions; JavaScript dependencies are pinned and locked. Keep tests and modules small; no speculative framework or core patches.
+- Python, Node and Python-dependency requirements declare minimums only, never upper bounds, so Hermes updates cannot be blocked by this plugin; JavaScript dependencies are pinned and locked. Keep tests and modules small; no speculative framework or core patches.
 - Deliver only verified behavior; do not claim token streaming, indefinite idle, universal billing savings or full role equivalence.
