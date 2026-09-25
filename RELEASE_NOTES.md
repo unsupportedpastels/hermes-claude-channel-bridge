@@ -4,7 +4,7 @@
 
 This is an **unpublished experimental candidate** released under the MIT License. No PyPI or other public-registry availability is claimed.
 
-The package supports Python **>=3.11,<3.14**. The earliest Hermes host used for end-to-end testing was **0.21.2**, but that does not establish a minimum-compatible Hermes API. Current Hermes accepts `requires_hermes` comparator strings in `plugin.yaml`; the field remains omitted until a compatibility range is established.
+The package supports Python **>=3.11**. The earliest Hermes host used for end-to-end testing was **0.21.2**, but that does not establish a minimum-compatible Hermes API. Current Hermes accepts `requires_hermes` comparator strings in `plugin.yaml`; the field remains omitted until a compatibility range is established.
 
 ## Candidate scope
 

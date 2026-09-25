@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77,<83"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,14 +11,14 @@ maintainers = [{ name = "unsupportedpastels", email = "theoldwizard123@pm.me" }]
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11"
 dependencies = [
-  "PyYAML>=6,<7", "jsonschema>=4,<5", "httpx>=0.27,<1",
-  "openai>=2,<3", "fastapi>=0.115,<1", "uvicorn>=0.30,<1",
-  "filelock>=3.15,<4", "python-dotenv>=1,<2", "psutil>=5.9,<8",
-  "pywinpty>=2.0.15,<3; sys_platform == 'win32'",
-  "pywin32>=308,<312; sys_platform == 'win32'",
-  "pyte>=0.8.2,<0.9; sys_platform == 'win32'",
+  "PyYAML>=6", "jsonschema>=4", "httpx>=0.27",
+  "openai>=2", "fastapi>=0.115", "uvicorn>=0.30",
+  "filelock>=3.15", "python-dotenv>=1", "psutil>=5.9",
+  "pywinpty>=2.0.15; sys_platform == 'win32'",
+  "pywin32>=308; sys_platform == 'win32'",
+  "pyte>=0.8.2; sys_platform == 'win32'",
 ]
 
 [project.entry-points."hermes_agent.plugins"]
@@ -38,7 +38,7 @@ pythonpath = ["."]
 include = ["claude_native_bridge*"]
 
 [tool.setuptools.package-data]
-claude_native_bridge = ["channel/README.md", "channel/server.mjs", "channel/protocol.mjs", "channel/http.mjs", "channel/platform.mjs", "channel/package.json", "channel/package-lock.json"]
+claude_native_bridge = ["channel/README.md", "channel/server.mjs", "channel/protocol.mjs", "channel/http.mjs", "channel/platform.mjs", "channel/diagnostic-log.mjs", "channel/package.json", "channel/package-lock.json"]
 
 [tool.setuptools.data-files]
 "share/doc/hermes-claude-native-bridge" = ["RELEASE_NOTES.md"]

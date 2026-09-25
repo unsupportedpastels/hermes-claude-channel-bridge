@@ -1,6 +1,6 @@
 # Standalone yield-and-wait channel
 
-Private transport used by the Claude Native Bridge. It requires Node **>=22,<23** and the pinned MCP SDK **1.30.0**. Tests use real SDK clients and local child servers; they do not authenticate Claude or invoke inference.
+Private transport used by the Claude Native Bridge. It requires Node **>=22** and the pinned MCP SDK **1.30.0**. Tests use real SDK clients and local child servers; they do not authenticate Claude or invoke inference.
 
 From a checkout:
 

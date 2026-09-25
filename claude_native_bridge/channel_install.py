@@ -53,7 +53,7 @@ def install_channel_dependencies(
     npm = executable_resolver("npm")
     if not npm:
         raise NativeBridgeError(
-            "npm was not found on PATH; install Node 22 with npm, then rerun setup or run: "
+            "npm was not found on PATH; install Node 22 or newer with npm, then rerun setup or run: "
             + manual
         )
     argv = install_command(root, npm=npm)

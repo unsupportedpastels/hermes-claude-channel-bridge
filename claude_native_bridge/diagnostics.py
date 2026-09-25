@@ -14,29 +14,30 @@ from typing import Callable, Iterable
 from .settings import NativeBridgeError, Settings
 
 
-# Distribution names and the bounded version contracts in pyproject.toml.
+# Distribution names and the minimum versions in pyproject.toml. There are no
+# upper bounds, so a Hermes update that moves a shared dependency forward
+# cannot make the bridge report itself broken.
 PYTHON_DEPENDENCIES = (
-    ("PyYAML", (6,), (7,)),
-    ("jsonschema", (4,), (5,)),
-    ("httpx", (0, 27), (1,)),
-    ("openai", (2,), (3,)),
-    ("fastapi", (0, 115), (1,)),
-    ("uvicorn", (0, 30), (1,)),
-    ("filelock", (3, 15), (4,)),
-    ("python-dotenv", (1,), (2,)),
-    ("psutil", (5, 9), (8,)),
+    ("PyYAML", (6,)),
+    ("jsonschema", (4,)),
+    ("httpx", (0, 27)),
+    ("openai", (2,)),
+    ("fastapi", (0, 115)),
+    ("uvicorn", (0, 30)),
+    ("filelock", (3, 15)),
+    ("python-dotenv", (1,)),
+    ("psutil", (5, 9)),
 )
 WINDOWS_DEPENDENCIES = (
-    ("pywinpty", (2, 0, 15), (3,)),
-    ("pywin32", (308,), (312,)),
-    ("pyte", (0, 8, 2), (0, 9)),
+    ("pywinpty", (2, 0, 15)),
+    ("pywin32", (308,)),
+    ("pyte", (0, 8, 2)),
 )
 CHANNEL_DEPENDENCIES = {
     "@modelcontextprotocol/sdk": "1.30.0",
     "zod": "3.25.76",
 }
 PYTHON_MINIMUM = (3, 11)
-PYTHON_MAXIMUM = (3, 14)
 
 _PLATFORM_DETAILS = {
     "linux": "Linux is supported; native bridge operation has been verified on real Linux hosts.",
@@ -66,15 +67,14 @@ def _version_tuple(version: str) -> tuple[int, ...] | None:
     return tuple(int(part) for part in match.group(1).split(".")) if match else None
 
 
-def _within(version: str, minimum: tuple[int, ...], maximum: tuple[int, ...]) -> bool:
+def _at_least(version: str, minimum: tuple[int, ...]) -> bool:
     parsed = _version_tuple(version)
     if parsed is None:
         return False
-    width = max(len(parsed), len(minimum), len(maximum))
+    width = max(len(parsed), len(minimum))
     padded = parsed + (0,) * (width - len(parsed))
     lower = minimum + (0,) * (width - len(minimum))
-    upper = maximum + (0,) * (width - len(maximum))
-    return lower <= padded < upper
+    return padded >= lower
 
 
 def _current_python_version() -> tuple[int, int, int]:
@@ -119,9 +119,9 @@ def _load_settings(home: Path) -> tuple[Settings, dict]:
 
 def _dependency_contracts(
     platform_name: str, required_distributions: Iterable[str] | None
-) -> tuple[tuple[str, tuple[int, ...] | None, tuple[int, ...] | None], ...]:
+) -> tuple[tuple[str, tuple[int, ...] | None], ...]:
     if required_distributions is not None:
-        return tuple((name, None, None) for name in required_distributions)
+        return tuple((name, None) for name in required_distributions)
     contracts = PYTHON_DEPENDENCIES
     if platform_name == "win32":
         contracts += WINDOWS_DEPENDENCIES
@@ -198,12 +198,12 @@ def doctor(
     )
 
     python_version = _current_python_version()
-    python_supported = PYTHON_MINIMUM <= python_version < PYTHON_MAXIMUM
+    python_supported = python_version >= PYTHON_MINIMUM
     checks.append(
         _check(
             "python",
             "pass" if python_supported else "fail",
-            "Python >=3.11,<3.14 is required.",
+            "Python >=3.11 is required.",
             version=".".join(str(part) for part in python_version),
         )
     )
@@ -226,13 +226,13 @@ def doctor(
         _check(
             "node_runtime_version",
             "warn",
-            "Node 22 is required, but its version was not invoked by this offline doctor.",
+            "Node 22 or newer is required, but its version was not invoked by this offline doctor.",
             version=None,
             compatibility="unknown",
         )
     )
 
-    for name, minimum, maximum in _dependency_contracts(
+    for name, minimum in _dependency_contracts(
         platform_name, required_distributions
     ):
         try:
@@ -247,24 +247,16 @@ def doctor(
                 )
             )
             continue
-        parsed = _version_tuple(installed)
-        compatible = (
-            minimum is None
-            or (
-                parsed is not None
-                and maximum is not None
-                and _within(installed, minimum, maximum)
-            )
-        )
+        compatible = minimum is None or _at_least(installed, minimum)
         checks.append(
             _check(
                 f"dependency:{name}",
                 "pass" if compatible else "fail",
-                "Installed Python distribution satisfies the declared bounded contract."
+                "Installed Python distribution meets the declared minimum version."
                 if compatible and minimum is not None
                 else "Installed Python distribution was found."
                 if compatible
-                else "Installed version is outside the declared bounded contract.",
+                else "Installed version is older than the declared minimum.",
                 version=installed,
             )
         )
