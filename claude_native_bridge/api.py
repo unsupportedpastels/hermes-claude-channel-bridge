@@ -26,6 +26,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .event_log import event_trace, failure_reason, record_event, safe_error_type
 from .models import MODELS
 from .protocol import _choice, _messages, _tool_definitions, _validate_arguments
+from .service_lifecycle import (
+    DRAIN_TIMEOUT_SECONDS,
+    IDLE_CHECK_SECONDS,
+    ServiceActivity,
+)
 from .settings import (
     LOGIN_REFRESH_CONTENTION_CODE,
     LOGIN_REFRESH_CONTENTION_MESSAGE,
@@ -948,8 +953,49 @@ class _ClosingStreamingResponse(StreamingResponse):
                 await self.cleanup()
 
 
-def create_app(token, home, engine_factory=None, owner_limit=None):
-    """Build a lazy service. Factory accepts ``hermes_home=home``; no launch here."""
+class _ActivityMiddleware:
+    """Count requests until their responses finish; refuse new work while draining."""
+
+    _DRAIN_EXEMPT = frozenset({"/health", "/v1/service/shutdown"})
+
+    def __init__(self, app, activity):
+        self.app = app
+        self.activity = activity
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        if self.activity.draining and scope.get("path") not in self._DRAIN_EXEMPT:
+            response = JSONResponse(
+                {
+                    "error": {
+                        "message": "Bridge service is shutting down",
+                        "type": "service_unavailable",
+                    }
+                },
+                status_code=503,
+            )
+            return await response(scope, receive, send)
+        self.activity.enter()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            self.activity.exit()
+
+
+def create_app(
+    token,
+    home,
+    engine_factory=None,
+    owner_limit=None,
+    idle_exit=None,
+    idle_seconds=0,
+):
+    """Build a lazy service. Factory accepts ``hermes_home=home``; no launch here.
+
+    ``idle_exit`` asks the hosting server to stop. Without it the service never
+    retires itself and refuses remote shutdown.
+    """
     if not isinstance(token, str) or not token.strip() or token != token.strip():
         raise ValueError("A nonempty bridge bearer credential is required")
     if engine_factory is None:
@@ -957,6 +1003,15 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
 
         engine_factory = NativeBridgeClient
     owners = Owners(engine_factory, home, limit=owner_limit)
+    activity = ServiceActivity(idle_seconds if idle_exit is not None else 0)
+
+    def busy_owners():
+        return any(owner.busy for owner in owners.items.values())
+
+    def retire(reason):
+        activity.draining = True
+        record_event("service_retiring", reason=reason)
+        idle_exit()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -965,17 +1020,29 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
                 await asyncio.sleep(min(30, OWNER_IDLE_SECONDS))
                 await owners.prune()
 
-        task = asyncio.create_task(reaper())
+        async def idle_monitor():
+            while True:
+                await asyncio.sleep(IDLE_CHECK_SECONDS)
+                if activity.should_retire(busy_owners()):
+                    retire("idle")
+                    return
+
+        tasks = [asyncio.create_task(reaper())]
+        if idle_exit is not None and activity.idle_seconds:
+            tasks.append(asyncio.create_task(idle_monitor()))
         try:
             yield
         finally:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+            for task in tasks:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
             await owners.shutdown()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.owners = owners
+    app.state.activity = activity
+    app.add_middleware(_ActivityMiddleware, activity=activity)
 
     @app.exception_handler(_TerminalHTTPError)
     async def terminal_http_error(request, exc):
@@ -989,11 +1056,37 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
             raise HTTPException(
                 401, "Invalid bridge credential", headers={"WWW-Authenticate": "Bearer"}
             )
+        activity.note_client(request.headers.get("x-hermes-bridge-process"))
 
     @app.get("/health")
     async def health(request: Request):
         authenticate(request)
+        if activity.draining:
+            return JSONResponse(
+                {"service": "claude-native-bridge", "status": "draining"},
+                status_code=503,
+            )
         return {"service": "claude-native-bridge", "status": "ok"}
+
+    @app.post("/v1/service/shutdown")
+    async def shutdown_service(request: Request):
+        authenticate(request)
+        if idle_exit is None:
+            raise HTTPException(409, "Service shutdown is not available")
+        if not activity.draining:
+            activity.draining = True
+
+            async def drain():
+                # This request is itself in flight until its response is sent.
+                deadline = time.monotonic() + DRAIN_TIMEOUT_SECONDS
+                while time.monotonic() < deadline:
+                    if activity.inflight == 0 and not busy_owners():
+                        break
+                    await asyncio.sleep(0.1)
+                retire("shutdown_requested")
+
+            app.state.drain_task = asyncio.create_task(drain())
+        return JSONResponse({"stopping": True}, status_code=202)
 
     @app.get("/v1/models")
     async def models(request: Request):

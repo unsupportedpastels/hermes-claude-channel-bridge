@@ -95,7 +95,12 @@ class OrphanSweepTests(unittest.TestCase):
                 events.append("sweep")
 
             def create_app(*args, **kwargs):
-                self.assertEqual(kwargs, {"owner_limit": 2})
+                self.assertEqual(
+                    set(kwargs), {"owner_limit", "idle_exit", "idle_seconds"}
+                )
+                self.assertEqual(kwargs["owner_limit"], 2)
+                self.assertEqual(kwargs["idle_seconds"], 300)
+                self.assertTrue(callable(kwargs["idle_exit"]))
                 events.append("app")
                 return object()
 

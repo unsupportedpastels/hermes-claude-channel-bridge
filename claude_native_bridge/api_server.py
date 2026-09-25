@@ -11,6 +11,7 @@ import tempfile
 
 import yaml
 
+from .api_config import configured_idle_exit
 from .settings import Settings
 from .supervisor import sweep_orphaned_runs
 from .event_log import close_event_log, configure_event_log, record_event
@@ -44,6 +45,7 @@ def main(argv=None):
     sweep_orphaned_runs(args.home)
     configure_event_log(args.ready_file.parent)
     owner_limit = configured_owner_limit(args.home)
+    idle_seconds = configured_idle_exit(args.home)
     record_event("service_started", capacity=owner_limit)
 
     import uvicorn
@@ -83,12 +85,23 @@ def main(argv=None):
                 finally:
                     Path(name).unlink(missing_ok=True)
 
+    running = {}
+
+    def request_exit():
+        # Same path as a termination signal: uvicorn drains, then the app's
+        # lifespan closes every native owner before the process exits.
+        server = running.get("server")
+        if server is not None:
+            server.should_exit = True
+
     try:
         config = uvicorn.Config(
             create_app(
                 token,
                 args.home,
                 owner_limit=owner_limit,
+                idle_exit=request_exit,
+                idle_seconds=idle_seconds,
             ),
             host="127.0.0.1",
             port=port,
@@ -98,7 +111,8 @@ def main(argv=None):
             ws="none",
             timeout_graceful_shutdown=5,
         )
-        Server(config).run(sockets=[sock])
+        running["server"] = Server(config)
+        running["server"].run(sockets=[sock])
     finally:
         sock.close()
         args.ready_file.unlink(missing_ok=True)

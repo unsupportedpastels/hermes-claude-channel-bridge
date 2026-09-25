@@ -14,7 +14,25 @@ import httpx
 import yaml
 import psutil
 
-from .api_config import TOKEN_ENV, api_storage, configured_port
+from .api_config import (
+    PROCESS_HEADER,
+    TOKEN_ENV,
+    api_storage,
+    configured_port,
+    process_identity,
+)
+from .runtime_environment import (
+    REPAIR_COMMAND,
+    SERVER_MODULE,
+    child_environment,
+    command,
+    ensure_ready,
+    error_summary,
+)
+
+STARTUP_TIMEOUT_SECONDS = 20
+DRAIN_WAIT_SECONDS = 30
+SHUTDOWN_TIMEOUT_SECONDS = 30
 
 
 def _private_directory(path):
@@ -40,25 +58,71 @@ def _write_private(path, content):
         stream.write(content)
 
 
-def _health(port, token):
+def _service_state(port, token):
+    """``"ok"``, ``"draining"`` or None; also registers this process as a client."""
     if type(port) is not int or not 1 <= port <= 65535:
-        return False
+        return None
     try:
         with httpx.Client(trust_env=False, timeout=0.4) as client:
             response = client.get(
                 f"http://127.0.0.1:{port}/health",
-                headers={"Authorization": "Bearer " + token},
+                headers={
+                    "Authorization": "Bearer " + token,
+                    PROCESS_HEADER: process_identity(),
+                },
             )
-        return (
-            response.status_code == 200
-            and response.json().get("service") == "claude-native-bridge"
-        )
+        body = response.json()
     except (httpx.HTTPError, ValueError):
-        return False
+        return None
+    if not isinstance(body, dict) or body.get("service") != "claude-native-bridge":
+        return None
+    if response.status_code == 200:
+        return "ok"
+    if response.status_code == 503 and body.get("status") == "draining":
+        return "draining"
+    return None
 
 
-def ensure_server(home, token, *, port=None):
-    """Start/reuse only our authenticated API; no native model is launched here."""
+def _health(port, token):
+    return _service_state(port, token) == "ok"
+
+
+def _wait_for_release(port, token):
+    """A draining service still owns its port; wait for it instead of racing it."""
+    deadline = time.monotonic() + DRAIN_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        if _service_state(port, token) != "draining":
+            return
+        time.sleep(0.2)
+    raise RuntimeError("Local API is shutting down; retry shortly")
+
+
+def _startup_failure(log, offset, status):
+    try:
+        with log.open("rb") as stream:
+            stream.seek(offset)
+            text = stream.read(65536).decode("utf-8", "replace")
+    except OSError:
+        text = ""
+    detail = error_summary(text)
+    hint = (
+        f"; run {REPAIR_COMMAND}"
+        if detail and detail.startswith(("ModuleNotFoundError", "ImportError"))
+        else ""
+    )
+    return RuntimeError(
+        f"Local API exited during startup (status {status}"
+        + (f": {detail}" if detail else "")
+        + f"){hint}; inspect {log}"
+    )
+
+
+def ensure_server(home, token, *, port=None, prepare_runtime=None):
+    """Start/reuse only our authenticated API; no native model is launched here.
+
+    ``prepare_runtime`` returns the server interpreter and runs only when a
+    launch is needed; by default an unready runtime is reported, not built.
+    """
     if not isinstance(token, str) or len(token) < 32 or any(c.isspace() for c in token):
         raise ValueError(
             "A configured bridge-only API key is required; run plugin setup"
@@ -71,14 +135,16 @@ def ensure_server(home, token, *, port=None):
     ready = root / "server.json"
     with FileLock(str(root / "server.lock"), timeout=20):
         previous = json.loads(ready.read_text()) if ready.exists() else {}
-        if desired and _health(desired, token):
+        candidate = desired or previous.get("port")
+        state = _service_state(candidate, token) if candidate else None
+        if state == "ok":
             return {
-                "port": desired,
-                "pid": previous.get("pid"),
-                "base_url": f"http://127.0.0.1:{desired}/v1",
+                **(previous if not desired else {"pid": previous.get("pid")}),
+                "port": candidate,
+                "base_url": f"http://127.0.0.1:{candidate}/v1",
             }
-        if not desired and previous.get("port") and _health(previous["port"], token):
-            return {**previous, "base_url": f"http://127.0.0.1:{previous['port']}/v1"}
+        if state == "draining":
+            _wait_for_release(candidate, token)
         keyfile = root / "token"
         if keyfile.exists() and not secrets.compare_digest(
             keyfile.read_text().strip(), token
@@ -86,38 +152,38 @@ def ensure_server(home, token, *, port=None):
             raise RuntimeError(
                 "Bridge credential differs from stored local API credential; rerun setup rather than replacing a running account"
             )
+        python = prepare_runtime() if prepare_runtime else ensure_ready(home)
         _write_private(keyfile, token)
         ready.unlink(missing_ok=True)
-        package_root = Path(__file__).resolve().parent.parent
-        env = dict(os.environ)
-        env["HERMES_HOME"] = str(home)
-        env["PYTHONPATH"] = str(package_root)
-        env["PYTHONUTF8"] = "1"
-        argv = [
-            sys.executable,
-            "-m",
-            "claude_native_bridge.api_server",
+        argv = command(
+            python,
+            SERVER_MODULE,
             "--home",
-            str(home),
+            home,
             "--token-file",
-            str(keyfile),
+            keyfile,
             "--ready-file",
-            str(ready),
+            ready,
             "--port",
-            str(desired),
-        ]
-        kwargs = {"cwd": str(package_root), "env": env, "stdin": subprocess.DEVNULL}
+            desired,
+        )
+        kwargs = {
+            "cwd": str(root),
+            "env": child_environment(HERMES_HOME=str(home)),
+            "stdin": subprocess.DEVNULL,
+        }
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         else:
             kwargs["start_new_session"] = True
         log = root / "api.log"
+        offset = log.stat().st_size if log.exists() else 0
         with log.open("ab") as output:
             process = subprocess.Popen(
                 argv, stdout=output, stderr=subprocess.STDOUT, **kwargs
             )
         try:
-            deadline = time.monotonic() + 20
+            deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
             while time.monotonic() < deadline:
                 if ready.exists():
                     info = json.loads(ready.read_text())
@@ -139,6 +205,7 @@ def ensure_server(home, token, *, port=None):
                                     "pid": service.pid,
                                     "created": service.create_time(),
                                     "argv": actual_argv,
+                                    "python": str(python),
                                 }
                             ),
                         )
@@ -150,9 +217,7 @@ def ensure_server(home, token, *, port=None):
                 # A Windows venv python.exe is a redirector: it may exit zero
                 # after spawning the real interpreter recorded in ready.json.
                 if status is not None and not (sys.platform == "win32" and status == 0):
-                    raise RuntimeError(
-                        f"Local API exited during startup; inspect {log}"
-                    )
+                    raise _startup_failure(log, offset, status)
                 time.sleep(0.1)
             raise TimeoutError(f"Local API startup timed out; inspect {log}")
         except BaseException:
@@ -174,7 +239,34 @@ def ensure_server(home, token, *, port=None):
             raise
 
 
-def stop_server(home):
+def _read_json(path):
+    try:
+        value = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _request_shutdown(port, token):
+    """Ask the service to drain and exit on its own; False if it cannot be asked."""
+    if type(port) is not int or not token:
+        return False
+    try:
+        with httpx.Client(trust_env=False, timeout=2) as client:
+            response = client.post(
+                f"http://127.0.0.1:{port}/v1/service/shutdown",
+                headers={"Authorization": "Bearer " + token},
+            )
+        return response.status_code == 202
+    except httpx.HTTPError:
+        return False
+
+
+def _same_process(process, info):
+    return process.create_time() == info["created"] and process.cmdline() == info["argv"]
+
+
+def stop_server(home, *, timeout=SHUTDOWN_TIMEOUT_SECONDS):
     root = api_storage(home)
     if not root.exists():
         return {"stopped": False, "reason": "No managed API process recorded"}
@@ -185,30 +277,45 @@ def stop_server(home):
         if not manager.exists():
             return {"stopped": False, "reason": "No managed API process recorded"}
         info = json.loads(manager.read_text())
+        result = {"stopped": True, "graceful": False, "forced": False}
         try:
             process = psutil.Process(info["pid"])
-            if (
-                process.create_time() != info["created"]
-                or process.cmdline() != info["argv"]
-            ):
+            if not _same_process(process, info):
                 raise RuntimeError(
                     "Recorded API process identity changed; refusing to stop it"
                 )
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except psutil.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=3)
+            token = (
+                (root / "token").read_text().strip()
+                if (root / "token").exists()
+                else ""
+            )
+            port = _read_json(root / "server.json").get("port")
+            if _request_shutdown(port, token):
+                try:
+                    process.wait(timeout=timeout)
+                    result["graceful"] = True
+                except psutil.TimeoutExpired:
+                    pass
+            # Re-check identity immediately before any forced termination.
+            if not result["graceful"] and _same_process(process, info):
+                result["forced"] = True
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except psutil.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
         except psutil.NoSuchProcess:
             pass
         manager.unlink(missing_ok=True)
         (root / "server.json").unlink(missing_ok=True)
-        return {"stopped": True}
+        return result
 
 
 def setup(home, *, accept_development_channels=False):
     """Configure the active profile through Hermes' existing config writers."""
+    from .runtime_environment import provision
+
     home = Path(home).resolve()
     os.environ["HERMES_HOME"] = str(home)
     config_path = home / "config.yaml"
@@ -218,7 +325,8 @@ def setup(home, *, accept_development_channels=False):
     token = (
         keyfile.read_text().strip() if keyfile.exists() else secrets.token_urlsafe(40)
     )
-    info = ensure_server(home, token, port=0)
+    runtime = provision(home)
+    info = ensure_server(home, token, port=0, prepare_runtime=lambda: runtime)
     from hermes_cli.config import save_config, save_env_value, get_env_path
     from dotenv import dotenv_values
 
@@ -237,6 +345,7 @@ def setup(home, *, accept_development_channels=False):
     return {
         "base_url": info["base_url"],
         "pid": info["pid"],
+        "runtime": str(runtime),
         "credential_saved": True,
         "default_model_changed": False,
         "home": str(home),

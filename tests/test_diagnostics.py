@@ -167,16 +167,10 @@ def test_dependency_versions_must_satisfy_the_full_declared_range(tmp_path):
     assert report["ready"] is False
 
 
-def test_python_version_must_satisfy_the_declared_range(tmp_path, monkeypatch):
+def test_python_version_is_reported_but_never_gates_readiness(tmp_path, monkeypatch):
     _write_config(tmp_path, {"development_channels_accepted": True})
 
-    for version, expected_status in (
-        ((3, 10, 9), "fail"),
-        ((3, 11, 0), "pass"),
-        ((3, 13, 9), "pass"),
-        ((3, 14, 0), "pass"),
-        ((3, 15, 0), "pass"),
-    ):
+    for version in ((3, 9, 0), (3, 11, 0), (3, 14, 0), (3, 15, 0), (4, 0, 0)):
         monkeypatch.setattr(
             diagnostics, "_current_python_version", lambda version=version: version
         )
@@ -188,8 +182,26 @@ def test_python_version_must_satisfy_the_declared_range(tmp_path, monkeypatch):
             platform_name="linux",
         )
         python = next(c for c in report["checks"] if c["id"] == "python")
-        assert python["status"] == expected_status
-        assert python["detail"] == "Python >=3.11 is required."
+        assert python["status"] == "pass"
+        assert python["version"] == ".".join(map(str, version))
+        assert report["ready"] is True
+
+
+def test_unprepared_server_runtime_warns_without_running_it(tmp_path):
+    _write_config(tmp_path, {"development_channels_accepted": True})
+    report = doctor(
+        tmp_path,
+        executable_resolver=lambda name: f"/safe/{name}",
+        distribution_version=_versions,
+        required_distributions=("PyYAML",),
+        platform_name="linux",
+    )
+
+    runtime = next(c for c in report["checks"] if c["id"] == "server_runtime")
+    assert runtime["status"] == "warn"
+    assert runtime["state"] == "missing"
+    assert "hermes-claude-bridge repair" in runtime["detail"]
+    assert not (tmp_path / "claude-native-bridge").exists()
 
 
 def test_missing_channel_dependencies_are_reported(tmp_path):
