@@ -19,6 +19,7 @@ import httpx
 import yaml
 
 from .native import MODELS, NativeSession, NativeSessionLost
+from .event_log import failure_reason, record_event, safe_error_type, safe_run
 from .protocol import HistoryTracker, build_completion
 from .settings import (
     ASSUMED_CONTEXT_WINDOW,
@@ -257,6 +258,15 @@ def _record_native_failure(native, exc, branch):
     is promoted into logs or the public API.
     """
     runtime = getattr(native, "runtime", None)
+    run = safe_run(runtime)
+    fields = {
+        "branch": branch,
+        "error_type": safe_error_type(exc),
+        "reason": failure_reason(exc),
+    }
+    if run is not None:
+        fields["run"] = run
+    record_event("native_failure", **fields)
     write = getattr(native, "_private_json", None)
     if runtime is None or not callable(write):
         return

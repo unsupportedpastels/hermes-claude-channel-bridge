@@ -41,6 +41,28 @@ test('rendezvous publishes a decision but only an exact ack releases its call', 
   assert.deepEqual(await final, {request: request('next-task')});
 });
 
+test('unknown tool proposal is rejected before yield and can be corrected in the same turn', async () => {
+  const bridge = new Bridge();
+  const bootstrap = JSON.stringify({operation: 'bootstrap', messages: [], tools: [
+    {type: 'function', function: {name: 'read_file', parameters: {type: 'object'}}},
+  ], tool_choice: 'auto'});
+  bridge.advance({ack: null, request: request('a', bootstrap)});
+  assert.throws(() => bridge.respond({request_id: 'a', kind: 'tool_calls', tool_calls: [
+    {name: 'patch', arguments: {}},
+  ]}), /not available.*read_file/);
+  assert.deepEqual(bridge.status(), {sequence: 0, current: 'a', held: null, failed: null});
+  const pending = bridge.respond({request_id: 'a', kind: 'tool_calls', tool_calls: [
+    {name: 'read_file', arguments: {}},
+  ]});
+  assert.equal(bridge.latest.tool_calls[0].name, 'read_file');
+  bridge.advance({ack: 1, request: request('b', JSON.stringify({operation: 'continue', messages: []}))});
+  await pending;
+  assert.throws(() => bridge.respond({request_id: 'b', kind: 'tool_calls', tool_calls: [
+    {name: 'patch', arguments: {}},
+  ]}), /not available.*read_file/);
+  assert.equal(bridge.status().current, 'b');
+});
+
 test('native cancellation rejects the held call and permanently breaks the session', async () => {
   const bridge = new Bridge();
   bridge.advance({ack: null, request: request('a')});

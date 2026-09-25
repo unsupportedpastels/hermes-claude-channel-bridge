@@ -13,11 +13,15 @@ class SettingsTests(unittest.TestCase):
             {"idle_timeout": 0},
             {"request_timeout": float("inf")},
             {"max_sessions": 0},
+            {"max_sessions": 11},
             {"development_channels_accepted": "true"},
             {"bogus": True},
         ]:
             with self.subTest(config=config), self.assertRaises(NativeBridgeError):
                 Settings.from_mapping(config)
+
+    def test_ten_concurrent_sessions_allowed(self):
+        self.assertEqual(Settings.from_mapping({"max_sessions": 10}).max_sessions, 10)
 
     def test_settings_default_does_not_select_model_or_enable_fallback(self):
         s = Settings.from_mapping({"development_channels_accepted": True})

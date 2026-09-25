@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from claude_native_bridge.api import create_app
+from claude_native_bridge.event_log import close_event_log, configure_event_log
 from claude_native_bridge.models import MODELS
 
 TOKEN = "test-only-local-credential"
@@ -90,6 +91,38 @@ def test_auth_catalog_and_ordinary_completion(tmp_path):
         assert engines[0].calls[0]["extra_body"] == {"hermes_session_id": "session-a"}
         assert engines[0].calls[0]["stream"] is False
     assert engines[0].closed.is_set()
+
+
+def test_rolling_events_cover_success_rejection_and_failure_without_content(tmp_path):
+    log = configure_event_log(tmp_path / "private-api")
+    try:
+        app, _ = app_factory(tmp_path, owner_limit=1)
+        owner_b = dict(HEADERS, **{"X-Hermes-Bridge-Client": "owner-b"})
+        with TestClient(app) as client:
+            assert client.post("/v1/chat/completions", headers=HEADERS, json=BODY).status_code == 200
+            assert client.post("/v1/chat/completions", headers=owner_b, json=BODY).status_code == 429
+
+        def fail(_engine, _kwargs):
+            raise RuntimeError("secret diagnostic detail from model")
+
+        app, _ = app_factory(tmp_path, behavior=fail)
+        with TestClient(app) as client:
+            assert client.post("/v1/chat/completions", headers=HEADERS, json=BODY).status_code == 502
+        rows = [json.loads(line) for line in log.read_text().splitlines()]
+        assert [row["event"] for row in rows] == [
+            "generation_started", "generation_completed", "admission_rejected",
+            "generation_started", "generation_failed",
+        ]
+        assert rows[0]["trace"] == rows[1]["trace"]
+        assert rows[3]["trace"] == rows[4]["trace"]
+        assert rows[2]["reason"] == "capacity"
+        assert rows[4]["error_type"] == "RuntimeError"
+        assert rows[4]["reason"] == "other"
+        text = log.read_text()
+        for secret in (TOKEN, "secret diagnostic detail from model", "hello", "owner-a"):
+            assert secret not in text
+    finally:
+        close_event_log()
 
 
 def test_title_response_format_is_validated_then_stripped_for_native(tmp_path):

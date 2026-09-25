@@ -13,6 +13,7 @@ import yaml
 
 from .settings import Settings
 from .supervisor import sweep_orphaned_runs
+from .event_log import close_event_log, configure_event_log, record_event
 
 
 def configured_owner_limit(home):
@@ -41,6 +42,9 @@ def main(argv=None):
         parser.error("credential file is empty")
 
     sweep_orphaned_runs(args.home)
+    configure_event_log(args.ready_file.parent)
+    owner_limit = configured_owner_limit(args.home)
+    record_event("service_started", capacity=owner_limit)
 
     import uvicorn
     from .api import create_app
@@ -84,7 +88,7 @@ def main(argv=None):
             create_app(
                 token,
                 args.home,
-                owner_limit=configured_owner_limit(args.home),
+                owner_limit=owner_limit,
             ),
             host="127.0.0.1",
             port=port,
@@ -98,6 +102,7 @@ def main(argv=None):
     finally:
         sock.close()
         args.ready_file.unlink(missing_ok=True)
+        close_event_log()
 
 
 if __name__ == "__main__":

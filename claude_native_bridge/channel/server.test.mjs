@@ -32,6 +32,25 @@ test('authenticated text completion retains MCP lifecycle and sends next channel
 });
 const result = response => JSON.parse(response.content[0].text);
 
+test('invalid native proposal returns an MCP error without publishing a decision', {timeout: 15_000}, async t => {
+  const f = await fixture(t, {diagnostics: true});
+  const bootstrap = JSON.stringify({operation: 'bootstrap', messages: [], tools: [
+    {type: 'function', function: {name: 'read_file', parameters: {type: 'object'}}},
+  ], tool_choice: 'auto'});
+  await f.advance(null, 'a', bootstrap);
+  const proposal = name => ({request_id: 'a', kind: 'tool_calls', tool_calls: [{name, arguments: {}}]});
+  await assert.rejects(f.respond(proposal('patch')), /not available.*read_file/);
+  assert.deepEqual((await f.api('/status')).body, {sequence: 0, current: 'a', held: null, failed: null});
+  const diagnostics = (await fs.readFile(path.join(f.dir, 'channel-diagnostics.log'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.ok(diagnostics.some(event => event.event === 'proposal_rejected' && event.reason === 'tool_absent' && event.tool === 'patch'));
+  assert.equal(f.logs.join(''), '', 'diagnostics stay out of native CLI stderr');
+  assert.deepEqual(await f.api('/response?after=0&wait_ms=0'), {status: 200, body: {response: null}});
+  const pending = f.respond(proposal('read_file'));
+  assert.equal((await f.api('/response?after=0')).body.response.tool_calls[0].name, 'read_file');
+  await f.advance(1, 'b', JSON.stringify({operation: 'continue', messages: []}));
+  await pending;
+});
+
 test('SDK handshake, channel delivery, held rendezvous and next task after final', {timeout: 15_000}, async t => {
   const f = await fixture(t);
   assert.equal(f.client.getServerVersion().name, 'hermesbridge');

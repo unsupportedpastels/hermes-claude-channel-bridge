@@ -137,6 +137,7 @@ export class Bridge extends EventEmitter {
   wakeGeneration = 0;
   wakePrompt = null;
   latestWake = null;
+  allowedTools = null;
 
   constructor() { super(); this.setMaxListeners(MAX_WAITERS + 1); }
   status() { return {sequence: this.sequence, current: this.current?.request_id ?? null, held: this.held?.sequence ?? null, failed: this.failed}; }
@@ -170,6 +171,15 @@ export class Bridge extends EventEmitter {
       this.fail('session_request_limit');
       this.assertHealthy();
     }
+    // A continue frame omits definitions, so retain the bootstrap allowlist.
+    // Validate proposals here, while respond can still return an MCP error and
+    // Claude can correct itself, rather than failing after publishing a yield.
+    try {
+      const frame = JSON.parse(body.request.content);
+      if (frame?.operation === 'bootstrap' && Array.isArray(frame.tools)) {
+        this.allowedTools = new Set(frame.tools.map(tool => tool?.function?.name).filter(identifier));
+      }
+    } catch { /* Older peers may send opaque content; the client still validates. */ }
     const previous = this.held;
     this.held = null;
     this.latest = null;
@@ -202,6 +212,15 @@ export class Bridge extends EventEmitter {
     this.assertHealthy();
     validateDecision(decision);
     if (this.held || !this.current || decision.request_id !== this.current.request_id) throw new BridgeError(409, 'Invalid or overlapping response');
+    if (decision.kind === 'tool_calls' && this.allowedTools !== null) {
+      const unknown = decision.tool_calls.find(call => !this.allowedTools.has(call.name));
+      if (unknown) {
+        const available = [...this.allowedTools].slice(0, 80);
+        const error = new BridgeError(400, `Tool ${JSON.stringify(unknown.name)} is not available for this request. Use only supplied tools: ${available.join(', ')}${this.allowedTools.size > available.length ? ', ...' : ''}`);
+        error.diagnostic = {reason: 'tool_absent', tool: /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/.test(unknown.name) ? unknown.name : 'invalid_name'};
+        throw error;
+      }
+    }
     if (signal?.aborted) {
       this.fail('native_cancelled');
       this.assertHealthy();
