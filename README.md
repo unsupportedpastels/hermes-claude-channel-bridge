@@ -119,7 +119,7 @@ All keys live under `claude_native_bridge` in Hermes `config.yaml`.
 Under `claude_native_bridge_api`:
 
 - `port`: the loopback API port that setup chose.
-- `idle_exit_seconds` (default `300`, `0` = never): how long the shared server may sit unused with no live Hermes client before it exits. Each Hermes process identifies itself by PID and process start time, so a reused PID never counts as a live client. The server stays up while any identified client process is alive or any request is in flight. The next client starts it again.
+- `idle_exit_seconds` (default `300`, `0` = never): how long the shared server may sit unused with no open bridge client before it exits. A client counts as open from its creation until Hermes closes it or its process exits; each Hermes process identifies itself by PID and process start time, so a reused PID never inherits another process's clients. A long-running dashboard or gateway that has closed its bridge clients does not keep the server up. The server also stays up while any request is in flight. The next client starts it again.
 
 To route Hermes subagents through the bridge:
 
