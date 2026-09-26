@@ -575,6 +575,8 @@ class Owner:
     retry_key: tuple[str, str, str] | None = None
     lineage: str | None = None
     lease_refs: set[str] = field(default_factory=set)
+    # Its last lease belonged to an exited process while a request was active.
+    orphaned: bool = False
 
 
 def _cleanup_proof(engine):
@@ -738,11 +740,11 @@ class Owners:
         self._prune_tombstones()
         releases = []
         for key, owner in list(self.items.items()):
-            if (
-                not owner.busy
-                and not owner.removal_requested
-                and time.monotonic() - owner.touched >= OWNER_IDLE_SECONDS
-            ):
+            if owner.busy or owner.removal_requested:
+                continue
+            if owner.orphaned and owner.lease_refs:
+                owner.orphaned = False  # A live wrapper referenced it again.
+            if owner.orphaned or time.monotonic() - owner.touched >= OWNER_IDLE_SECONDS:
                 self._start_release(key, owner)
                 releases.append(self._bounded_release(owner))
         if releases:
@@ -922,11 +924,15 @@ class Owners:
         return matched
 
     async def release_leases(self, leases):
-        """Release owners left open by a Hermes process that exited."""
+        """Release owners left open by a Hermes process that exited.
+
+        The notice arrives once, so a busy owner drops the dead leases now and
+        only its release waits for the active request (see ``prune``).
+        """
         releases = []
         for key, owner in list(self.items.items()):
-            if owner.removal_requested or owner.busy:
-                continue  # A busy owner's disconnected request settles it.
+            if owner.removal_requested:
+                continue
             if key in leases:
                 owner.lease_refs.clear()
             elif owner.lease_refs & leases:
@@ -934,6 +940,9 @@ class Owners:
                 if owner.lease_refs:
                     continue
             else:
+                continue
+            if owner.busy:
+                owner.orphaned = True
                 continue
             self._start_release(key, owner)
             releases.append(self._bounded_release(owner))
