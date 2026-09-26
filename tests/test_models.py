@@ -59,6 +59,12 @@ def test_unmodified_host_http_picker_and_session_selection(tmp_path):
         import http.server,json,os,platform,sys,threading
         from pathlib import Path
         platform.system()  # Prime Windows platform metadata before process audit.
+        # Prime host provenance too: an unstamped Hermes checkout reads it from git.
+        try:
+            from hermes_cli.version_info import get_version_info
+            get_version_info()
+        except ImportError:
+            pass
         TOKEN='fixture-local-api-token-000000000000000000'
         from claude_native_bridge.models import MODELS as CATALOG
         MODELS=list(CATALOG)
