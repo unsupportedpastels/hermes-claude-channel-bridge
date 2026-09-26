@@ -43,7 +43,9 @@ logger = logging.getLogger(__name__)
 MAX_BODY_BYTES = 8 * 1024 * 1024
 MAX_OWNERS = 32
 OWNER_IDLE_SECONDS = 600.0
-REQUEST_TIMEOUT_SECONDS = 600.0
+# Above the native default request_timeout (1800 s) so the engine, which also
+# detects frozen CLIs, is the one that ends a slow turn.
+REQUEST_TIMEOUT_SECONDS = 1860.0
 CLOSE_TIMEOUT_SECONDS = 5.0
 _PROVENANCE_FIELD = "native_bridge_usage_provenance"
 _PROVENANCE_COUNTERS = (

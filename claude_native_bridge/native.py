@@ -52,6 +52,9 @@ FIRST_BATCH_GRACE_SECONDS = 0.25
 FINAL_BATCH_POLL_SECONDS = 0.05
 TERMINATE_GRACE_SECONDS = 2.0
 KILL_GRACE_SECONDS = 1.0
+# Claude Code shows no token progress while it thinks; its only signal is the
+# spinner's elapsed-seconds repaint. Probe the pane at this interval.
+STALL_PROBE_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -552,6 +555,32 @@ class NativeSession:
         except (OSError, subprocess.SubprocessError):
             return False
 
+    def _screen(self):
+        """Current pane text, or None when it cannot be observed."""
+        try:
+            result = self._tmux("capture-pane", "-t", "worker", "-p", check=False)
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+            return None
+        return result.stdout if result.returncode == 0 else None
+
+    def _check_stall(self, watch):
+        """Fail a request whose CLI died or stopped repainting."""
+        now = time.monotonic()
+        if now - watch["probed"] < STALL_PROBE_SECONDS:
+            return
+        watch["probed"] = now
+        if not self.health():
+            raise NativeBridgeError("Native Claude exited during inference")
+        screen = self._screen()
+        if screen is None or screen != watch["screen"]:
+            # An unobservable pane is not evidence of a stall.
+            watch["screen"], watch["changed"] = screen, now
+        elif now - watch["changed"] >= self.settings.stall_timeout:
+            raise NativeBridgeError(
+                "Native Claude stopped updating for %d seconds; the dedicated "
+                "session was stopped." % int(now - watch["changed"])
+            )
+
     def _usage_snapshot(self):
         try:
             return json.loads((self.runtime / "native-usage.json").read_text())
@@ -690,12 +719,14 @@ class NativeSession:
                 },
                 deadline=deadline,
             )
+            watch = {"probed": time.monotonic(), "changed": time.monotonic(), "screen": None}
             while time.monotonic() < deadline:
                 if self.closed:
                     raise NativeBridgeError("Native session cancelled")
                 if cancel_check and cancel_check():
                     raise InterruptedError("Hermes interrupted native inference")
                 self._check_compaction()
+                self._check_stall(watch)
                 text_batches.drain(self.runtime)
                 stop_file = self.runtime / "native-stop.json"
                 if stop_file.exists():
@@ -762,6 +793,7 @@ class NativeSession:
                     ):
                         raise NativeBridgeError("Invalid native wake correlation")
                     wake_generation = wake["generation"]
+                    watch["changed"] = time.monotonic()
                 response = result.get("response")
                 if response is not None:
                     if (

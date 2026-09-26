@@ -47,7 +47,13 @@ class Settings:
     command: str = "claude"
     effort: str = "medium"
     startup_timeout: float = 30.0
-    request_timeout: float = 900.0
+    # Hard cap on one exchange. Frozen or dead CLIs are caught sooner by
+    # stall_timeout, so this only bounds a live CLI whose turn never ends.
+    request_timeout: float = 1800.0
+    # Seconds the native pane may stay unchanged mid-request before the
+    # session is treated as frozen. The native spinner repaints every second
+    # while it thinks, so an unchanged pane is not a slow model.
+    stall_timeout: float = 90.0
     idle_timeout: float = 300.0
     max_sessions: int = 2
     page_threshold: int = 20_000
@@ -82,7 +88,12 @@ class Settings:
         ):
             if type(getattr(value, name)) is not bool:
                 raise NativeBridgeError(name + " must be boolean")
-        for name in ("startup_timeout", "request_timeout", "idle_timeout"):
+        for name in (
+            "startup_timeout",
+            "request_timeout",
+            "stall_timeout",
+            "idle_timeout",
+        ):
             n = getattr(value, name)
             if (
                 isinstance(n, bool)

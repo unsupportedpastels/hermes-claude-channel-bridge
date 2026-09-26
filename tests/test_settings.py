@@ -12,6 +12,7 @@ class SettingsTests(unittest.TestCase):
         for config in [
             {"idle_timeout": 0},
             {"request_timeout": float("inf")},
+            {"stall_timeout": 0},
             {"max_sessions": 0},
             {"max_sessions": 11},
             {"development_channels_accepted": "true"},
