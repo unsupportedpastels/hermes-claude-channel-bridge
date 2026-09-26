@@ -44,8 +44,9 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install tmux
       - name: Install Hermes and the plugin with its server extra
-        # ruamel.yaml: Hermes' bundled providers need it, but its base install omits it.
-        run: python -m pip install -e ./hermes-agent -e "./plugin[server]" ruamel.yaml pytest pytest-asyncio
+        # ruamel.yaml, requests: Hermes' bundled providers and picker import them,
+        # but its base install omits them (the live install's venv has both).
+        run: python -m pip install -e ./hermes-agent -e "./plugin[server]" ruamel.yaml requests pytest pytest-asyncio
       - name: Install locked channel dependencies
         working-directory: plugin/claude_native_bridge/channel
         run: npm ci --ignore-scripts

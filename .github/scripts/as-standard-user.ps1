@@ -50,7 +50,9 @@ $lines += @(
     'New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null',
     '$env:HERMES_HOME = Join-Path $env:TEMP ''hermes-home''',
     "Set-Location -LiteralPath $(Quote $WorkingDirectory)",
-    "& { $Command } *>&1 | Out-File -LiteralPath `$log -Encoding utf8",
+    # cmd redirection captures every handle, including output that grandchild
+    # processes write straight to an inherited console.
+    "& `$env:ComSpec /d /s /c `"$Command > `"`"`$log`"`" 2>&1`"",
     'exit $LASTEXITCODE'
 )
 $child = Join-Path $scratch 'run.ps1'
