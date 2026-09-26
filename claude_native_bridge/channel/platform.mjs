@@ -9,6 +9,21 @@ function assertNoLinks(target) {
   return stat;
 }
 
+// No PATH lookup of an arbitrary powershell executable. Windows PowerShell 5.1
+// started from PowerShell 7 inherits PS7's PSModulePath and then cannot load
+// Microsoft.PowerShell.Security (Get-Acl/Set-Acl); without it, 5.1 rebuilds
+// its own default module path.
+export function windowsPowerShell(script, options = {}) {
+  const root = process.env.SystemRoot;
+  if (!root || !path.isAbsolute(root)) throw new Error('Windows system directory');
+  const powershell = path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PSMODULEPATH'));
+  return execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+    Buffer.from(script, 'utf16le').toString('base64')],
+  {timeout: 10000, windowsHide: true, ...options, env});
+}
+
 function windowsPrivatePath(target, directory) {
   // Node stat has no general FILE_ATTRIBUTE_REPARSE_POINT field. Use the
   // built-in Windows ACL API via PowerShell, not POSIX mode/guessed usernames.
@@ -34,14 +49,9 @@ foreach ($rule in $rules) {
   if ($rule.IdentityReference.Value -ne $sid.Value -or $rule.AccessControlType -ne 'Allow') { throw 'public ACL' }
 }
 `;
-  // No PATH lookup of an arbitrary powershell executable. Fail closed when the
-  // system installation is absent or enterprise policy blocks the ACL check.
-  const root = process.env.SystemRoot;
-  if (!root || !path.isAbsolute(root)) throw new Error('Windows system directory');
-  const powershell = path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
-    Buffer.from(script, 'utf16le').toString('base64')],
-  {stdio: ['ignore', 'ignore', 'pipe'], timeout: 10000, windowsHide: true});
+  // Fail closed when the system installation is absent or enterprise policy
+  // blocks the ACL check.
+  windowsPowerShell(script, {stdio: ['ignore', 'ignore', 'pipe']});
 }
 
 export function assertPrivateRuntime(dir) {

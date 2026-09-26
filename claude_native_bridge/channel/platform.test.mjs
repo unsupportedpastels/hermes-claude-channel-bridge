@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {assertPrivateRuntime, readTransport} from './platform.mjs';
+import {assertPrivateRuntime, readTransport, windowsPowerShell} from './platform.mjs';
 import {execFileSync} from 'node:child_process';
 
 function fixture(t) {
@@ -49,9 +49,7 @@ test('relative directory rejected', () => assert.throws(() => assertPrivateRunti
 test('real Windows protected ACL accepted; junction and public ACL refused',
   {skip: process.platform !== 'win32'}, t => {
     const dir = fixture(t);
-    const ps = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    const run = script => execFileSync(ps, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
-      Buffer.from(script, 'utf16le').toString('base64')], {timeout: 10000, stdio: 'pipe'});
+    const run = script => windowsPowerShell(script, {stdio: 'pipe'});
     const literal = dir.replaceAll("'", "''");
     run(`$ErrorActionPreference='Stop'
       $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
