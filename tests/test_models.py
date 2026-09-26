@@ -122,6 +122,8 @@ def test_unmodified_host_http_picker_and_session_selection(tmp_path):
         "PATH": os.environ.get("PATH", ""),
         "PYTHONPATH": os.pathsep.join(entry for entry in sys.path if entry),
         "HOME": str(tmp_path),
+        # Windows Python resolves the home directory from USERPROFILE, not HOME.
+        "USERPROFILE": str(tmp_path),
         "HERMES_HOME": str(tmp_path),
         "LANG": "C.UTF-8",
         "TZ": "UTC",

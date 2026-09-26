@@ -64,12 +64,6 @@ jobs:
         run: python -m pytest -q -p no:cacheprovider
 
       # Hosted Windows runners are elevated administrators; real installs never are.
-      # TEMPORARY diagnostic: channel ACL check under the MCP SDK child environment.
-      - name: ACL probe (Windows, standard user)
-        if: runner.os == 'Windows'
-        continue-on-error: true
-        shell: powershell
-        run: ./plugin/.github/scripts/as-standard-user.ps1 -WorkingDirectory "$env:GITHUB_WORKSPACE\plugin\claude_native_bridge\channel" -Command 'node ..\..\.github\scripts\ps-env-probe.mjs .'
       - name: Channel tests (Windows, standard user)
         if: runner.os == 'Windows'
         shell: powershell
