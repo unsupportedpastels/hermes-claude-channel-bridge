@@ -1,0 +1,54 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  suite:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # The plugin imports Hermes core (providers, agent) from a checkout, the way an installed plugin does.
+      HERMES_AGENT_REPO: ${{ github.workspace }}/hermes-agent
+      HERMES_HOME: ${{ runner.temp }}/hermes-home
+      PYTHONUTF8: "1"
+    steps:
+      - name: Allow long paths (hermes-agent's docs tree exceeds MAX_PATH)
+        if: runner.os == 'Windows'
+        run: git config --system core.longpaths true
+      - uses: actions/checkout@v4
+        with:
+          path: plugin
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          path: hermes-agent
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Real tmux sessions exercise the Unix supervisor and teardown tests.
+      - name: Install tmux (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Install tmux (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tmux
+      - name: Install Hermes and the plugin with its server extra
+        run: python -m pip install -e ./hermes-agent -e "./plugin[server]" pytest pytest-asyncio
+      - name: Install locked channel dependencies
+        working-directory: plugin/claude_native_bridge/channel
+        run: npm ci --ignore-scripts
+      - name: Channel tests
+        working-directory: plugin/claude_native_bridge/channel
+        run: npm test
+      - name: Python suite (real process trees, tmux/ConPTY, cancellation)
+        working-directory: plugin
+        run: python -m pytest -q -p no:cacheprovider
