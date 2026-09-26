@@ -57,6 +57,22 @@ class OrphanSweepTests(unittest.TestCase):
             self.assertEqual(archived, [run.with_name("session-live.archived")])
             self.assertTrue(archived[0].is_dir())
 
+    def test_sweep_matches_a_long_claude_path_under_a_narrow_columns(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            deep = home / ("d" * 120)
+            deep.mkdir()
+            claude = deep / "claude-fixture"
+            claude.symlink_to(shutil.which("sleep"))
+            process = self._spawn([str(claude), "60"])
+            run = self._run_dir(home, "session-deep", process.pid, "fixture")
+
+            with patch.dict(os.environ, {"COLUMNS": "80"}):
+                supervisor.sweep_orphaned_runs(home)
+
+            process.wait(timeout=3)
+            self.assertFalse(run.exists())
+
     def test_sweep_archives_stale_pid_without_signalling(self):
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder)
