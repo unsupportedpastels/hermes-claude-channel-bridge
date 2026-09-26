@@ -15,7 +15,6 @@ jobs:
     env:
       # The plugin imports Hermes core (providers, agent) from a checkout, the way an installed plugin does.
       HERMES_AGENT_REPO: ${{ github.workspace }}/hermes-agent
-      HERMES_HOME: ${{ runner.temp }}/hermes-home
       PYTHONUTF8: "1"
     steps:
       - name: Allow long paths (hermes-agent's docs tree exceeds MAX_PATH)
@@ -51,4 +50,7 @@ jobs:
         run: npm test
       - name: Python suite (real process trees, tmux/ConPTY, cancellation)
         working-directory: plugin
+        env:
+          # The runner context is only available at step level.
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
         run: python -m pytest -q -p no:cacheprovider
