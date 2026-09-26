@@ -4,7 +4,16 @@
 
 This is an **unpublished experimental candidate** released under the MIT License. No PyPI or other public-registry availability is claimed.
 
-The package supports Python **>=3.11**. The earliest Hermes host used for end-to-end testing was **0.21.2**, but that does not establish a minimum-compatible Hermes API. Current Hermes accepts `requires_hermes` comparator strings in `plugin.yaml`; the field remains omitted until a compatibility range is established.
+The package declares no Python version. Hermes selects the interpreter for the provider adapter, and Hermes's package manager selects the one for the isolated server runtime. The offline suite has been run on Python 3.11 and 3.14. The earliest Hermes host used for end-to-end testing was **0.21.2**, but that does not establish a minimum-compatible Hermes API. Current Hermes accepts `requires_hermes` comparator strings in `plugin.yaml`; the field remains omitted until a compatibility range is established.
+
+## Runtime isolation and service lifecycle
+
+- **Cause fixed.** The API server was started as bare `sys.executable -m claude_native_bridge.api_server` with `PYTHONPATH` replaced by the plugin directory. Under a managed Hermes, dependencies reach the host's `sys.path` through the bootstrap, not through that interpreter, so the child failed with `ModuleNotFoundError: No module named 'yaml'`. Hermes then fell back to a client aimed at a listener that did not exist, and the failure showed up only as connection retries.
+- **Server runtime.** Server-only packages now live in the plugin's own environment, built by Hermes's package manager (`pm.ensure_environment`), with a standard-venv fallback for hosts without it. They moved from `[project].dependencies` to the `server` extra, so they no longer enter Hermes's dependency resolution. The server starts isolated (`-I`), with only this package importable.
+- **No installs on start.** Starting never installs. Setup, `repair`, or a first use with recorded development-channel consent prepares the runtime. A failed rebuild leaves the previous runtime selected. Startup failures now name the exception (for example the missing module) and the repair command.
+- **Import-light registration.** Provider registration no longer imports the OpenAI SDK or pydantic. A launcher whose dependency generation does not match its interpreter (seen as `No module named 'pydantic_core._pydantic_core'`) still lists the provider.
+- **Lifecycle.** The shared service exits after `claude_native_bridge_api.idle_exit_seconds` (default 300) once no live Hermes process (PID plus start time) holds an open bridge client and nothing is in flight. Clients open when created and close when Hermes closes them, so a permanent dashboard or gateway does not pin the service. `create_client` also refuses to launch on a loopback port already owned by another process. `stop` asks the service to drain and exit before falling back to identity-checked termination.
+- **Limits.** There is no Hermes update hook, so automatic shutdown before an update is not guaranteed; `stop` remains the explicit pre-update step. If Hermes changes its pinned Python, the runtime needs `repair`, or it is rebuilt on first use when consent is recorded.
 
 ## Candidate scope
 
@@ -26,6 +35,18 @@ The Python and channel package roots are aligned at candidate version **0.2.0**;
 - **Windows 11:** 279 Python tests passed and 18 skipped; 31 Node tests passed and 5 skipped, alongside native ConPTY, Job Object, ACL, lifecycle, model-discovery, and installed-provider coverage. The tested revision predates the correlated Stop-only final fallback, so that later behavior is not claimed as Windows-verified.
 - **macOS:** native acceptance passed 3 user prompts and 5 model calls in 17.64 seconds, covering an exactly-once tool effect, retained fact, controlled rotation, rotation metadata, a non-rotating follow-up, and verified cleanup. Rotation used a one-shot test cap derived from genuine prior status telemetry. This establishes lifecycle behavior, not that a natural production threshold was reached and not a universal throughput, rate-limit, allowance, or billing promise.
 - Platform results are revision-specific. Offline tests do not prove native model availability, authentication, billing, or every target-platform lifecycle path.
+- **Runtime-isolation revision, Linux (Jarvis, Ubuntu 24.04, Hermes 0.21.5):**
+  - Offline suite: 383 passed and 3 skipped on Python 3.14. On Python 3.11, 381 passed; the same 2 tests fail with and without this change, because of a Hermes import under that legacy venv.
+  - Node: 38 passed, 1 skipped.
+  - `evals/runtime_durability.py`, run in a throwaway home under a bare managed interpreter:
+    - The old launch reproduces the missing-`yaml` failure.
+    - A real PM runtime is built, and every server module imports inside that runtime's own prefix.
+    - The server maps no application-environment files.
+    - A live client keeps the server up; it retires about 18 s after its last client exits.
+    - Cold restart works, and stop is graceful.
+    - An A→B runtime upgrade works, and a failed upgrade keeps B.
+    - Two homes stay isolated.
+  - No model call was made. **Windows and macOS were not exercised for this revision.** Their code paths (Windows venv redirector argv match, graceful stop in place of `TerminateProcess`, PM on those hosts) are untested there.
 
 No live inference, service operation, Hermes configuration change, publication, push, or commit was performed during this release-cleanup step.
 

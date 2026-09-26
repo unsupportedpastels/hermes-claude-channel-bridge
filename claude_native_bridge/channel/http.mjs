@@ -3,6 +3,8 @@ import {timingSafeEqual} from 'node:crypto';
 import {BridgeError, LONG_POLL_MS, MAX_BYTES, MAX_WAITERS, MAX_WAKE_GENERATION} from './protocol.mjs';
 
 const BODY_TIMEOUT_MS = 15_000;
+// Upload remainder a 413 will discard before answering; beyond it the socket closes.
+const DRAIN_LIMIT = 2 * MAX_BYTES;
 const json = (res, status, data) => {
   if (res.destroyed || res.writableEnded) return;
   res.writeHead(status, {'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'});
@@ -31,6 +33,25 @@ function readBody(req) {
     };
     const timer = setTimeout(() => fail(new BridgeError(408, 'Request body timeout')), BODY_TIMEOUT_MS);
     req.on('data', onData); req.once('end', onEnd); req.once('aborted', onAbort); req.once('error', onAbort);
+  });
+}
+
+// A 413 sent mid-upload closes a socket holding unread bytes, which Windows turns
+// into a TCP reset: the client sees ECONNRESET instead of the status. Discard a
+// bounded remainder first, within the body timeout.
+function drainRejectedBody(req) {
+  if (req.complete) return Promise.resolve();
+  return new Promise(resolve => {
+    let bytes = 0;
+    const done = () => {
+      clearTimeout(timer);
+      req.off('data', onData); req.off('end', done); req.off('close', done); req.off('error', done);
+      resolve();
+    };
+    const onData = chunk => { bytes += chunk.length; if (bytes > DRAIN_LIMIT) done(); };
+    const timer = setTimeout(done, BODY_TIMEOUT_MS);
+    req.on('data', onData); req.once('end', done); req.once('close', done); req.once('error', done);
+    req.resume();
   });
 }
 
@@ -121,6 +142,7 @@ export function createHttpServer({bridge, token, advance, log = () => {}}) {
       if (status === 500) bridge.fail('http_internal_error');
       // Never log request data, IDs, authorization, or exception text.
       log('http_rejected', {status});
+      if (status === 413) await drainRejectedBody(req);
       if (!req.complete) res.setHeader('Connection', 'close');
       json(res, status, {error: error instanceof BridgeError ? error.message : 'Internal error'});
     }

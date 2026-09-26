@@ -70,6 +70,38 @@ class APIProviderTests(unittest.TestCase):
         self.assertEqual(request.get_header("Authorization"), "Bearer " + "x" * 40)
         self.assertEqual(request.get_header("X-hermes-bridge-client"), "owner-test")
 
+    def test_failed_client_construction_releases_the_registered_owner(self):
+        def unavailable(*args, **kwargs):
+            raise RuntimeError("SDK extension could not load")
+
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            (home / "config.yaml").write_text(
+                "claude_native_bridge_api:\n  port: 19876\n"
+            )
+            profile = make_profile(home)
+            with (
+                patch(
+                    "claude_native_bridge.api_provider.active_home", return_value=home
+                ),
+                patch("claude_native_bridge.api_service.ensure_server") as start,
+                patch(
+                    "claude_native_bridge.api_provider._bridge_openai",
+                    return_value=unavailable,
+                ),
+                patch(
+                    "claude_native_bridge.api_provider.urlopen",
+                    return_value=SimpleNamespace(close=lambda: None),
+                ) as send,
+            ):
+                with self.assertRaises(RuntimeError):
+                    profile.create_client(api_key="x" * 40, base_url=profile.base_url)
+        owner = start.call_args.kwargs["client"]
+        self.assertEqual(send.call_count, 1)
+        request = send.call_args.args[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:19876/v1/owner/close")
+        self.assertEqual(request.get_header("X-hermes-bridge-client"), owner)
+
     def test_bridge_key_is_not_sent_to_a_nonlocal_or_legacy_uri(self):
         with tempfile.TemporaryDirectory() as folder:
             profile = make_profile(Path(folder))

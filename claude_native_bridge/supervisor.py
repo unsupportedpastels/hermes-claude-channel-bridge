@@ -27,8 +27,10 @@ def _ps_identity(pid):
     if not _pid_is_live(pid):
         return None
     try:
+        # -ww: ps otherwise cuts args to $COLUMNS even when piped, and a long
+        # install path then loses the "claude" the identity check needs.
         result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "pgid=", "-o", "lstart=", "-o", "args="],
+            ["ps", "-ww", "-p", str(pid), "-o", "pgid=", "-o", "lstart=", "-o", "args="],
             capture_output=True,
             text=True,
             timeout=3,

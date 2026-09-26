@@ -167,6 +167,96 @@ def test_explicit_owner_close_releases_native_and_is_idempotent(tmp_path):
         assert client.post("/v1/owner/close", headers=HEADERS).json() == {"closed": False}
 
 
+def test_owners_left_open_by_an_exited_process_are_released(tmp_path):
+    app, engines = app_factory(tmp_path)
+    owner_b = dict(HEADERS, **{"X-Hermes-Bridge-Client": "owner-b"})
+    logical = dict(
+        HEADERS,
+        **{
+            "X-Hermes-Bridge-Client": "owner-c",
+            "X-Hermes-Bridge-Retry-Lineage": "6f1c2a52-3a52-4f55-9a8e-0d6f4b1e5c11",
+        },
+    )
+    with TestClient(app) as client:
+        for headers in (HEADERS, owner_b, logical):
+            assert client.post("/v1/chat/completions", headers=headers, json=BODY).status_code == 200
+        assert len(engines) == 3
+        client.portal.call(app.state.owners.release_leases, {"owner-a", "owner-c"})
+        assert engines[0].closed.is_set() and engines[2].closed.is_set()
+        assert not engines[1].closed.is_set(), "another process's owner stays"
+
+
+LINEAGE = "6f1c2a52-3a52-4f55-9a8e-0d6f4b1e5c11"
+DEAD_LEASE = "0b9f5c1e-6d0a-4c38-9f7e-3c2a1d4e5f60"
+LIVE_LEASE = "5a7e2d3c-1b4f-4e6a-8c9d-0f1e2d3c4b5a"
+
+
+def _busy_logical_owner(tmp_path, client_lease, leases):
+    """Start a request that stays active until the returned gate is set."""
+    gate = threading.Event()
+
+    def hold(_engine, _kwargs):
+        assert gate.wait(10)
+        return completion()
+
+    app, engines = app_factory(tmp_path, behavior=hold)
+    headers = dict(
+        HEADERS,
+        **{
+            "X-Hermes-Bridge-Client": client_lease,
+            "X-Hermes-Bridge-Retry-Lineage": LINEAGE,
+            "X-Hermes-Bridge-Leases": ",".join(leases),
+        },
+    )
+    return app, engines, gate, headers
+
+
+def _run_held(client, app, headers):
+    statuses = []
+    worker = threading.Thread(
+        target=lambda: statuses.append(
+            client.post("/v1/chat/completions", headers=headers, json=BODY).status_code
+        )
+    )
+    worker.start()
+    deadline = time.monotonic() + 5
+    while not any(o.busy for o in app.state.owners.items.values()):
+        assert time.monotonic() < deadline, "request never became active"
+        time.sleep(0.01)
+    return worker, statuses
+
+
+def test_busy_owner_orphaned_by_an_exited_process_is_released_after_its_request(tmp_path):
+    app, engines, gate, headers = _busy_logical_owner(tmp_path, DEAD_LEASE, [DEAD_LEASE])
+    with TestClient(app) as client:
+        worker, statuses = _run_held(client, app, headers)
+        # The exit notice is delivered once, while the request is still active.
+        client.portal.call(app.state.owners.release_leases, {DEAD_LEASE})
+        assert not engines[0].closed.is_set(), "an active request is never torn down"
+        gate.set()
+        worker.join(10)
+        assert statuses == [200]
+        client.portal.call(app.state.owners.prune)
+        assert engines[0].closed.is_set(), "released without waiting for the idle prune"
+
+
+def test_dead_lease_is_dropped_from_a_busy_shared_owner(tmp_path):
+    app, engines, gate, headers = _busy_logical_owner(
+        tmp_path, LIVE_LEASE, [DEAD_LEASE, LIVE_LEASE]
+    )
+    with TestClient(app) as client:
+        worker, statuses = _run_held(client, app, headers)
+        client.portal.call(app.state.owners.release_leases, {DEAD_LEASE})
+        gate.set()
+        worker.join(10)
+        assert statuses == [200]
+        client.portal.call(app.state.owners.prune)
+        assert not engines[0].closed.is_set(), "the surviving lease still uses it"
+        closed = client.post("/v1/owner/close", headers=headers).json()
+        assert closed == {"closed": True}
+        assert engines[0].closed.is_set(), "closing the last live lease releases it"
+
+
 def test_configured_owner_capacity_is_global_and_close_frees_slot(tmp_path):
     app, engines = app_factory(tmp_path, owner_limit=1)
     owner_b = dict(HEADERS, **{"X-Hermes-Bridge-Client": "owner-b"})

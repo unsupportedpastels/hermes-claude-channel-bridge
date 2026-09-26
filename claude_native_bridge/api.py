@@ -26,6 +26,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .event_log import event_trace, failure_reason, record_event, safe_error_type
 from .models import MODELS
 from .protocol import _choice, _messages, _tool_definitions, _validate_arguments
+from .service_lifecycle import (
+    DRAIN_TIMEOUT_SECONDS,
+    IDLE_CHECK_SECONDS,
+    ServiceActivity,
+)
 from .settings import (
     LOGIN_REFRESH_CONTENTION_CODE,
     LOGIN_REFRESH_CONTENTION_MESSAGE,
@@ -38,7 +43,9 @@ logger = logging.getLogger(__name__)
 MAX_BODY_BYTES = 8 * 1024 * 1024
 MAX_OWNERS = 32
 OWNER_IDLE_SECONDS = 600.0
-REQUEST_TIMEOUT_SECONDS = 600.0
+# Above the native default request_timeout (1800 s) so the engine, which also
+# detects frozen CLIs, is the one that ends a slow turn.
+REQUEST_TIMEOUT_SECONDS = 1860.0
 CLOSE_TIMEOUT_SECONDS = 5.0
 _PROVENANCE_FIELD = "native_bridge_usage_provenance"
 _PROVENANCE_COUNTERS = (
@@ -568,6 +575,8 @@ class Owner:
     retry_key: tuple[str, str, str] | None = None
     lineage: str | None = None
     lease_refs: set[str] = field(default_factory=set)
+    # Its last lease belonged to an exited process while a request was active.
+    orphaned: bool = False
 
 
 def _cleanup_proof(engine):
@@ -731,11 +740,11 @@ class Owners:
         self._prune_tombstones()
         releases = []
         for key, owner in list(self.items.items()):
-            if (
-                not owner.busy
-                and not owner.removal_requested
-                and time.monotonic() - owner.touched >= OWNER_IDLE_SECONDS
-            ):
+            if owner.busy or owner.removal_requested:
+                continue
+            if owner.orphaned and owner.lease_refs:
+                owner.orphaned = False  # A live wrapper referenced it again.
+            if owner.orphaned or time.monotonic() - owner.touched >= OWNER_IDLE_SECONDS:
                 self._start_release(key, owner)
                 releases.append(self._bounded_release(owner))
         if releases:
@@ -914,6 +923,32 @@ class Owners:
             await asyncio.gather(*releases)
         return matched
 
+    async def release_leases(self, leases):
+        """Release owners left open by a Hermes process that exited.
+
+        The notice arrives once, so a busy owner drops the dead leases now and
+        only its release waits for the active request (see ``prune``).
+        """
+        releases = []
+        for key, owner in list(self.items.items()):
+            if owner.removal_requested:
+                continue
+            if key in leases:
+                owner.lease_refs.clear()
+            elif owner.lease_refs & leases:
+                owner.lease_refs -= leases
+                if owner.lease_refs:
+                    continue
+            else:
+                continue
+            if owner.busy:
+                owner.orphaned = True
+                continue
+            self._start_release(key, owner)
+            releases.append(self._bounded_release(owner))
+        if releases:
+            await asyncio.gather(*releases)
+
     async def shutdown(self):
         owners = list(self.items.items())
         for key, owner in owners:
@@ -948,8 +983,49 @@ class _ClosingStreamingResponse(StreamingResponse):
                 await self.cleanup()
 
 
-def create_app(token, home, engine_factory=None, owner_limit=None):
-    """Build a lazy service. Factory accepts ``hermes_home=home``; no launch here."""
+class _ActivityMiddleware:
+    """Count requests until their responses finish; refuse new work while draining."""
+
+    _DRAIN_EXEMPT = frozenset({"/health", "/v1/service/shutdown"})
+
+    def __init__(self, app, activity):
+        self.app = app
+        self.activity = activity
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        if self.activity.draining and scope.get("path") not in self._DRAIN_EXEMPT:
+            response = JSONResponse(
+                {
+                    "error": {
+                        "message": "Bridge service is shutting down",
+                        "type": "service_unavailable",
+                    }
+                },
+                status_code=503,
+            )
+            return await response(scope, receive, send)
+        self.activity.enter()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            self.activity.exit()
+
+
+def create_app(
+    token,
+    home,
+    engine_factory=None,
+    owner_limit=None,
+    idle_exit=None,
+    idle_seconds=0,
+):
+    """Build a lazy service. Factory accepts ``hermes_home=home``; no launch here.
+
+    ``idle_exit`` asks the hosting server to stop. Without it the service never
+    retires itself and refuses remote shutdown.
+    """
     if not isinstance(token, str) or not token.strip() or token != token.strip():
         raise ValueError("A nonempty bridge bearer credential is required")
     if engine_factory is None:
@@ -957,25 +1033,49 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
 
         engine_factory = NativeBridgeClient
     owners = Owners(engine_factory, home, limit=owner_limit)
+    activity = ServiceActivity(idle_seconds if idle_exit is not None else 0)
+
+    def busy_owners():
+        return any(owner.busy for owner in owners.items.values())
+
+    def retire(reason):
+        activity.draining = True
+        record_event("service_retiring", reason=reason)
+        idle_exit()
 
     @asynccontextmanager
     async def lifespan(app):
         async def reaper():
             while True:
                 await asyncio.sleep(min(30, OWNER_IDLE_SECONDS))
+                orphaned = activity.take_orphaned()
+                if orphaned:
+                    await owners.release_leases(orphaned)
                 await owners.prune()
 
-        task = asyncio.create_task(reaper())
+        async def idle_monitor():
+            while True:
+                await asyncio.sleep(IDLE_CHECK_SECONDS)
+                if activity.should_retire(busy_owners()):
+                    retire("idle")
+                    return
+
+        tasks = [asyncio.create_task(reaper())]
+        if idle_exit is not None and activity.idle_seconds:
+            tasks.append(asyncio.create_task(idle_monitor()))
         try:
             yield
         finally:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+            for task in tasks:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
             await owners.shutdown()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.owners = owners
+    app.state.activity = activity
+    app.add_middleware(_ActivityMiddleware, activity=activity)
 
     @app.exception_handler(_TerminalHTTPError)
     async def terminal_http_error(request, exc):
@@ -989,11 +1089,40 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
             raise HTTPException(
                 401, "Invalid bridge credential", headers={"WWW-Authenticate": "Bearer"}
             )
+        activity.note_client(
+            request.headers.get("x-hermes-bridge-process"),
+            request.headers.get("x-hermes-bridge-client"),
+        )
 
     @app.get("/health")
     async def health(request: Request):
         authenticate(request)
+        if activity.draining:
+            return JSONResponse(
+                {"service": "claude-native-bridge", "status": "draining"},
+                status_code=503,
+            )
         return {"service": "claude-native-bridge", "status": "ok"}
+
+    @app.post("/v1/service/shutdown")
+    async def shutdown_service(request: Request):
+        authenticate(request)
+        if idle_exit is None:
+            raise HTTPException(409, "Service shutdown is not available")
+        if not activity.draining:
+            activity.draining = True
+
+            async def drain():
+                # This request is itself in flight until its response is sent.
+                deadline = time.monotonic() + DRAIN_TIMEOUT_SECONDS
+                while time.monotonic() < deadline:
+                    if activity.inflight == 0 and not busy_owners():
+                        break
+                    await asyncio.sleep(0.1)
+                retire("shutdown_requested")
+
+            app.state.drain_task = asyncio.create_task(drain())
+        return JSONResponse({"stopping": True}, status_code=202)
 
     @app.get("/v1/models")
     async def models(request: Request):
@@ -1017,6 +1146,8 @@ def create_app(token, home, engine_factory=None, owner_limit=None):
         key = request.headers.get("x-hermes-bridge-client", "")
         if not key or len(key) > 512:
             raise HTTPException(400, "Invalid owner identifier")
+        # A closed client no longer keeps its process counted as a live user.
+        activity.release_client(request.headers.get("x-hermes-bridge-process"), key)
         lineage = _canonical_uuid(
             request.headers.get("x-hermes-bridge-retry-lineage", "")
         )

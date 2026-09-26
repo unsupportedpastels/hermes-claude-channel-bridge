@@ -14,30 +14,25 @@ from typing import Callable, Iterable
 from .settings import NativeBridgeError, Settings
 
 
-# Distribution names and the minimum versions in pyproject.toml. There are no
-# upper bounds, so a Hermes update that moves a shared dependency forward
-# cannot make the bridge report itself broken.
+# Host-side distribution names and the minimum versions in pyproject.toml.
+# There are no upper bounds, so a Hermes update that moves a shared dependency
+# forward cannot make the bridge report itself broken. Server-only packages
+# live in the isolated server runtime and are checked there, not in Hermes.
 PYTHON_DEPENDENCIES = (
     ("PyYAML", (6,)),
-    ("jsonschema", (4,)),
     ("httpx", (0, 27)),
     ("openai", (2,)),
-    ("fastapi", (0, 115)),
-    ("uvicorn", (0, 30)),
     ("filelock", (3, 15)),
     ("python-dotenv", (1,)),
     ("psutil", (5, 9)),
 )
 WINDOWS_DEPENDENCIES = (
-    ("pywinpty", (2, 0, 15)),
     ("pywin32", (308,)),
-    ("pyte", (0, 8, 2)),
 )
 CHANNEL_DEPENDENCIES = {
     "@modelcontextprotocol/sdk": "1.30.0",
     "zod": "3.25.76",
 }
-PYTHON_MINIMUM = (3, 11)
 
 _PLATFORM_DETAILS = {
     "linux": "Linux is supported; native bridge operation has been verified on real Linux hosts.",
@@ -114,6 +109,36 @@ def _load_settings(home: Path) -> tuple[Settings, dict]:
         )
     return settings, _check(
         "configuration", "pass", "Bridge configuration parsed successfully."
+    )
+
+
+def _runtime_check(home: Path) -> dict:
+    """Read the server runtime selection without running or installing it."""
+    from .runtime_environment import REPAIR_COMMAND, status
+
+    try:
+        state = status(home)
+    except Exception as exc:
+        return _check(
+            "server_runtime",
+            "warn",
+            f"Server runtime state could not be read ({type(exc).__name__}).",
+            state="unknown",
+        )
+    if state["state"] == "ready":
+        return _check(
+            "server_runtime",
+            "pass",
+            "The isolated server runtime is prepared and validated.",
+            state="ready",
+            version=state.get("version"),
+        )
+    return _check(
+        "server_runtime",
+        "fail" if state["state"] == "broken" else "warn",
+        f"The isolated server runtime is {state['state']}; run {REPAIR_COMMAND}. "
+        "With development-channel consent recorded, first use prepares it.",
+        state=state["state"],
     )
 
 
@@ -197,16 +222,15 @@ def doctor(
         )
     )
 
-    python_version = _current_python_version()
-    python_supported = python_version >= PYTHON_MINIMUM
     checks.append(
         _check(
             "python",
-            "pass" if python_supported else "fail",
-            "Python >=3.11 is required.",
-            version=".".join(str(part) for part in python_version),
+            "pass",
+            "The bridge declares no Python version; Hermes selects the interpreter.",
+            version=".".join(str(part) for part in _current_python_version()),
         )
     )
+    checks.append(_runtime_check(Path(home)))
 
     resolved: dict[str, str | None] = {}
     for name in _executable_names(platform_name, settings.command):

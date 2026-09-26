@@ -3,16 +3,15 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {randomBytes} from 'node:crypto';
-import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {z} from 'zod';
+import {windowsPowerShell} from './platform.mjs';
 
 function secureWindowsFixture(dir) {
   if (process.platform !== 'win32') return;
-  const powershell = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   const literal = dir.replaceAll("'", "''");
   const script = `$ErrorActionPreference='Stop'
     $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -22,8 +21,7 @@ function secureWindowsFixture(dir) {
     $rule=New-Object Security.AccessControl.FileSystemAccessRule($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow')
     $acl.AddAccessRule($rule)
     Set-Acl -LiteralPath '${literal}' -AclObject $acl`;
-  execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
-    Buffer.from(script, 'utf16le').toString('base64')], {timeout: 10000, stdio: 'pipe'});
+  windowsPowerShell(script, {stdio: 'pipe'});
 }
 
 export async function until(check, timeout = 4000) {
@@ -43,7 +41,9 @@ export async function fixture(t, {diagnostics = false} = {}) {
   await fs.writeFile(path.join(dir, 'transport.json'), JSON.stringify({token}), {mode: 0o600});
   const transport = new StdioClientTransport({
     command: process.execPath, args: [fileURLToPath(new URL('./server.mjs', import.meta.url))],
-    env: {HERMES_BRIDGE_RUNTIME_DIR: dir, HERMES_BRIDGE_DIAGNOSTICS: diagnostics ? '1' : '0'}, stderr: 'pipe', maxBufferSize: 9 * 1024 * 1024,
+    // The full environment, as the native CLI launches the server. The SDK's
+    // default Windows allowlist makes PowerShell's ACL check hang on some hosts.
+    env: {...process.env, HERMES_BRIDGE_RUNTIME_DIR: dir, HERMES_BRIDGE_DIAGNOSTICS: diagnostics ? '1' : '0'}, stderr: 'pipe', maxBufferSize: 9 * 1024 * 1024,
   });
   const client = new Client({name: 'offline-protocol-test', version: '1.0.0'}, {capabilities: {}});
   const channels = [];

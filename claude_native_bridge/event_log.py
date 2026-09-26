@@ -18,10 +18,12 @@ LOGGER.propagate = False
 EVENTS = frozenset({
     "service_started", "admission_rejected", "generation_started",
     "generation_completed", "generation_failed", "native_failure",
+    "service_retiring",
 })
 REASONS = frozenset({
     "unknown_tool", "text_batch_order", "native_disconnected", "request_timeout",
     "capacity", "replay", "owner_busy", "engine_unavailable", "other",
+    "idle", "shutdown_requested", "draining",
 })
 BRANCHES = frozenset({"not_delivered", "uncertain", "unexpected"})
 FIELDS = frozenset({

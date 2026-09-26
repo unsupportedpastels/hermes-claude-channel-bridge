@@ -35,7 +35,7 @@ def _ensure_channel_dependencies(*, skip_install: bool) -> dict:
 def main(argv=None):
     parser = argparse.ArgumentParser(prog=PROG)
     commands = parser.add_subparsers(dest="action", required=True)
-    for action in ("setup", "start", "status", "stop", "doctor"):
+    for action in ("setup", "start", "status", "stop", "doctor", "repair"):
         command = commands.add_parser(action)
         command.add_argument("--home", type=Path)
         if action == "setup":
@@ -63,10 +63,19 @@ def main(argv=None):
         result = doctor(home, check_cli_version=args.check_cli_version)
         print(json.dumps(result, indent=2))
         return 0 if result["ready"] else 1
+    if args.action == "repair":
+        # Rebuilds only the plugin's server runtime: no credential, port,
+        # consent or model change, and Hermes's own dependencies are untouched.
+        from .runtime_environment import provision, status
+
+        provision(home)
+        print(json.dumps(status(home), indent=2))
+        return 0
 
     # Lifecycle modules are deliberately not imported by the offline doctor.
     from .api_config import api_base_url, api_storage, configured_port
     from .api_service import _health, ensure_server, setup, stop_server
+    from .runtime_environment import status as runtime_status
 
     if args.action == "setup":
         channel = _ensure_channel_dependencies(
@@ -89,6 +98,7 @@ def main(argv=None):
             else {
                 "running": _health(configured_port(home), token),
                 "base_url": api_base_url(home),
+                "runtime": runtime_status(home),
             }
         )
     print(json.dumps(result, indent=2))

@@ -1,4 +1,9 @@
-"""Standard OpenAI HTTP provider registration for the plugin-owned local API."""
+"""Standard OpenAI HTTP provider registration for the plugin-owned local API.
+
+Registration imports nothing beyond Hermes's provider interface: the OpenAI SDK
+(and pydantic under it) loads only when a client is created, so a host whose
+launcher cannot load those packages still lists the provider.
+"""
 
 import inspect
 import os
@@ -9,12 +14,17 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-import yaml
-from openai import OpenAI
 from providers import register_provider
 from providers.base import ProviderProfile
 
-from .api_config import TOKEN_ENV, active_home, api_base_url, api_storage
+from .api_config import (
+    PROCESS_HEADER,
+    TOKEN_ENV,
+    active_home,
+    api_base_url,
+    api_storage,
+    process_identity,
+)
 from .models import MODELS, reasoning_efforts
 from .settings import LOGIN_REFRESH_CONTENTION_CODE, LOGIN_REFRESH_CONTENTION_MESSAGE
 
@@ -58,62 +68,92 @@ def _active_leases(lineage):
         return tuple(sorted(_lineage_leases.get(lineage, ())))
 
 
-class BridgeOpenAI(OpenAI):
-    """OpenAI client that releases its plugin-owned native owner on close."""
+def _send_owner_close(close_url, token, owner, lineage=None):
+    headers = {
+        "Authorization": "Bearer " + token,
+        OWNER_HEADER: owner,
+        PROCESS_HEADER: process_identity(),
+    }
+    if lineage is not None:
+        headers[RETRY_LINEAGE_HEADER] = lineage
+    try:
+        response = urlopen(Request(close_url, data=b"", method="POST", headers=headers), timeout=2)
+        response.close()
+    except Exception:
+        # Closing must remain safe during process shutdown or when the bridge
+        # server has already exited.
+        pass
 
-    def __init__(
-        self,
-        *args,
-        bridge_close_url,
-        bridge_token,
-        bridge_owner,
-        bridge_lineage=None,
-        **kwargs,
-    ):
-        self._bridge_close_url = bridge_close_url
-        self._bridge_token = bridge_token
-        self._bridge_owner = bridge_owner
-        self._bridge_lineage = bridge_lineage or str(uuid.uuid4())
-        self._bridge_owner_closed = False
-        _register_lease(self._bridge_lineage, bridge_owner)
-        try:
-            super().__init__(*args, **kwargs)
-        except BaseException:
-            _unregister_lease(self._bridge_lineage, bridge_owner)
-            raise
 
-    @property
-    def default_headers(self):
-        # The SDK evaluates this property for every request. Publishing all
-        # sibling leases lets the service retain a logical owner before an
-        # otherwise-idle shared primary client makes its summary request.
-        headers = dict(super().default_headers)
-        headers[LEASES_HEADER] = ",".join(_active_leases(self._bridge_lineage))
-        return headers
+def _bridge_openai():
+    """Build the client class on first use so registration never imports the SDK.
 
-    def close(self):
-        if not self._bridge_owner_closed:
-            self._bridge_owner_closed = True
-            request = Request(
-                self._bridge_close_url,
-                data=b"",
-                method="POST",
-                headers={
-                    "Authorization": "Bearer " + self._bridge_token,
-                    OWNER_HEADER: self._bridge_owner,
-                    RETRY_LINEAGE_HEADER: self._bridge_lineage,
-                },
-            )
+    The class is cached as the module attribute ``BridgeOpenAI``, so callers and
+    tests see one object whether they import it or patch it.
+    """
+    existing = globals().get("BridgeOpenAI")
+    if existing is not None:
+        return existing
+    from openai import OpenAI
+
+    class BridgeOpenAI(OpenAI):
+        """OpenAI client that releases its plugin-owned native owner on close."""
+
+        def __init__(
+            self,
+            *args,
+            bridge_close_url,
+            bridge_token,
+            bridge_owner,
+            bridge_lineage=None,
+            **kwargs,
+        ):
+            self._bridge_close_url = bridge_close_url
+            self._bridge_token = bridge_token
+            self._bridge_owner = bridge_owner
+            self._bridge_lineage = bridge_lineage or str(uuid.uuid4())
+            self._bridge_owner_closed = False
+            _register_lease(self._bridge_lineage, bridge_owner)
             try:
-                response = urlopen(request, timeout=2)
-                response.close()
-            except Exception:
-                # Closing the local SDK client must remain safe during process
-                # shutdown or when the bridge server has already exited.
-                pass
-            finally:
-                _unregister_lease(self._bridge_lineage, self._bridge_owner)
-        super().close()
+                super().__init__(*args, **kwargs)
+            except BaseException:
+                _unregister_lease(self._bridge_lineage, bridge_owner)
+                raise
+
+        @property
+        def default_headers(self):
+            # The SDK evaluates this property for every request. Publishing all
+            # sibling leases lets the service retain a logical owner before an
+            # otherwise-idle shared primary client makes its summary request.
+            # The process identity keeps the shared service alive while this
+            # Hermes process lives.
+            headers = dict(super().default_headers)
+            headers[LEASES_HEADER] = ",".join(_active_leases(self._bridge_lineage))
+            headers[PROCESS_HEADER] = process_identity()
+            return headers
+
+        def close(self):
+            if not self._bridge_owner_closed:
+                self._bridge_owner_closed = True
+                try:
+                    _send_owner_close(
+                        self._bridge_close_url,
+                        self._bridge_token,
+                        self._bridge_owner,
+                        self._bridge_lineage,
+                    )
+                finally:
+                    _unregister_lease(self._bridge_lineage, self._bridge_owner)
+            super().close()
+
+    globals()["BridgeOpenAI"] = BridgeOpenAI
+    return BridgeOpenAI
+
+
+def __getattr__(name):
+    if name == "BridgeOpenAI":
+        return _bridge_openai()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 CONSENT_KEY = "development_channels_accepted"
@@ -121,6 +161,8 @@ CONSENT_KEY = "development_channels_accepted"
 
 def _consent_recorded(home):
     """True when config.yaml already records development-channel consent."""
+    import yaml
+
     config = Path(home) / "config.yaml"
     try:
         data = yaml.safe_load(config.read_text(encoding="utf-8")) if config.exists() else {}
@@ -193,6 +235,7 @@ def _classify_bridge_error(
 class ClaudeAPIProfile(ProviderProfile):
     def create_client(self, **kwargs):
         from .api_service import ensure_server
+        from .runtime_environment import ensure_ready
 
         configured = kwargs.get("base_url")
         home = None
@@ -219,22 +262,40 @@ class ClaudeAPIProfile(ProviderProfile):
             # predates it.
             base_url = configured_url
             parsed = urlsplit(base_url)
-        ensure_server(home, token, port=parsed.port or 80)
-        supported = set(inspect.signature(OpenAI).parameters)
-        arguments = {key: value for key, value in kwargs.items() if key in supported}
-        inherited_headers = arguments.get("default_headers")
-        headers = dict(inherited_headers or {})
-        headers[RETRY_LINEAGE_HEADER] = _retry_lineage(inherited_headers)
+        # The server runtime is the plugin's own environment, so building it
+        # cannot change Hermes's dependencies; it still needs recorded consent.
+        consent = _consent_recorded(home)
         owner = str(uuid.uuid4())
-        headers[OWNER_HEADER] = owner
-        arguments.update(api_key=token, base_url=base_url, default_headers=headers)
-        return BridgeOpenAI(
-            **arguments,
-            bridge_close_url=base_url.rstrip("/") + "/owner/close",
-            bridge_token=token,
-            bridge_owner=owner,
-            bridge_lineage=headers[RETRY_LINEAGE_HEADER],
+        close_url = base_url.rstrip("/") + "/owner/close"
+        ensure_server(
+            home,
+            token,
+            port=parsed.port or 80,
+            prepare_runtime=lambda: ensure_ready(home, allow_provision=consent),
+            client=owner,
         )
+        # The health probe above registered owner as an open client; until a
+        # client object exists to close it, a failure here must release it.
+        try:
+            from openai import OpenAI
+
+            supported = set(inspect.signature(OpenAI).parameters)
+            arguments = {key: value for key, value in kwargs.items() if key in supported}
+            inherited_headers = arguments.get("default_headers")
+            headers = dict(inherited_headers or {})
+            headers[RETRY_LINEAGE_HEADER] = _retry_lineage(inherited_headers)
+            headers[OWNER_HEADER] = owner
+            arguments.update(api_key=token, base_url=base_url, default_headers=headers)
+            return _bridge_openai()(
+                **arguments,
+                bridge_close_url=close_url,
+                bridge_token=token,
+                bridge_owner=owner,
+                bridge_lineage=headers[RETRY_LINEAGE_HEADER],
+            )
+        except BaseException:
+            _send_owner_close(close_url, token, owner)
+            raise
 
     def build_extra_body(self, *, session_id=None, **context):
         return {"hermes_session_id": session_id} if session_id else {}
