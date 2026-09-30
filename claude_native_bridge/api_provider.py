@@ -26,7 +26,11 @@ from .api_config import (
     process_identity,
 )
 from .models import MODELS, reasoning_efforts
-from .settings import LOGIN_REFRESH_CONTENTION_CODE, LOGIN_REFRESH_CONTENTION_MESSAGE
+from .settings import (
+    BOOTSTRAP_FRAME_TOO_LARGE_CODE,
+    LOGIN_REFRESH_CONTENTION_CODE,
+    LOGIN_REFRESH_CONTENTION_MESSAGE,
+)
 
 OWNER_HEADER = "X-Hermes-Bridge-Client"
 RETRY_LINEAGE_HEADER = "X-Hermes-Bridge-Retry-Lineage"
@@ -225,6 +229,22 @@ def _classify_bridge_error(
     ):
         return {
             "reason": "auth_permanent",
+            "retryable": False,
+            "should_rotate_credential": False,
+            "should_fallback": False,
+        }
+    if (
+        isinstance(envelope, dict)
+        and envelope.get("code") == BOOTSTRAP_FRAME_TOO_LARGE_CODE
+        and envelope.get("type") == "invalid_request_error"
+    ):
+        # The bridge refused the frame before any inference and a retry resends
+        # the same frame, so stop at once and show the message naming the limit.
+        # No host reason describes a bridge setting: `unknown` with retries off
+        # renders the neutral terminal copy, where `format_error` would call the
+        # request malformed and suggest a new session.
+        return {
+            "reason": "unknown",
             "retryable": False,
             "should_rotate_credential": False,
             "should_fallback": False,

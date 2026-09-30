@@ -41,6 +41,29 @@ class NativeRequestNotDelivered(NativeBridgeError):
     """
 
 
+BOOTSTRAP_FRAME_TOO_LARGE_CODE = "bootstrap_frame_too_large"
+
+
+class NativeBootstrapTooLarge(NativeRequestNotDelivered):
+    """The part of a bootstrap that cannot be paged out exceeds bootstrap_max_chars.
+
+    Nothing reached the native, but unlike other undelivered requests an
+    unchanged retry cannot succeed: the same frame is refused until the limit is
+    raised or the instructions shrink. The message carries sizes, never content,
+    and leads with the fix so it survives truncation.
+    """
+
+    def __init__(self, required, maximum):
+        self.required, self.maximum = required, maximum
+        super().__init__(
+            "Raise claude_native_bridge.bootstrap_max_chars above "
+            f"{required:,} (now {maximum:,}) with `hermes config set "
+            "claude_native_bridge.bootstrap_max_chars <n>`. Claude was not sent "
+            "this request: its instructions, tool definitions and current turn "
+            "cannot be paged out, so an unchanged retry fails the same way."
+        )
+
+
 @dataclass(frozen=True)
 class Settings:
     development_channels_accepted: bool = False

@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 
+from .settings import NativeBootstrapTooLarge
+
 
 LOGGER = logging.getLogger("claude_native_bridge.events")
 LOGGER.propagate = False
@@ -23,7 +25,7 @@ EVENTS = frozenset({
 REASONS = frozenset({
     "unknown_tool", "text_batch_order", "native_disconnected", "request_timeout",
     "capacity", "replay", "owner_busy", "engine_unavailable", "other",
-    "idle", "shutdown_requested", "draining",
+    "idle", "shutdown_requested", "draining", "bootstrap_too_large",
 })
 BRANCHES = frozenset({"not_delivered", "uncertain", "unexpected"})
 FIELDS = frozenset({
@@ -72,6 +74,8 @@ def close_event_log():
 
 def failure_reason(exc):
     """Map exact known failure messages to codes; never persist exception text."""
+    if isinstance(exc, NativeBootstrapTooLarge):
+        return "bootstrap_too_large"
     message = str(exc)
     if message == "Decision selected a tool absent from the supplied definitions":
         return "unknown_tool"

@@ -32,8 +32,10 @@ from .service_lifecycle import (
     ServiceActivity,
 )
 from .settings import (
+    BOOTSTRAP_FRAME_TOO_LARGE_CODE,
     LOGIN_REFRESH_CONTENTION_CODE,
     LOGIN_REFRESH_CONTENTION_MESSAGE,
+    NativeBootstrapTooLarge,
     NativeLoginRefreshContention,
     NativeRequestNotDelivered,
 )
@@ -505,7 +507,11 @@ def _not_delivered(exc):
 
 
 def _terminal_error(exc):
-    """Return a fixed safe provider error for the one recognized terminal failure."""
+    """Return a safe provider error for a recognized terminal failure, else None.
+
+    Both messages are the bridge's own text: a fixed string, or fixed wording
+    around two measured sizes.
+    """
     seen = set()
     current = exc
     while current is not None and id(current) not in seen:
@@ -514,6 +520,12 @@ def _terminal_error(exc):
                 "message": LOGIN_REFRESH_CONTENTION_MESSAGE,
                 "type": "authentication_error",
                 "code": LOGIN_REFRESH_CONTENTION_CODE,
+            }
+        if isinstance(current, NativeBootstrapTooLarge):
+            return {
+                "message": str(current),
+                "type": "invalid_request_error",
+                "code": BOOTSTRAP_FRAME_TOO_LARGE_CODE,
             }
         seen.add(id(current))
         current = current.__cause__

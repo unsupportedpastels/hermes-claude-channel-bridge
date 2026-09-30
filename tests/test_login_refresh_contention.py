@@ -214,8 +214,10 @@ import openai
 import agent.error_classifier as classifier
 from claude_native_bridge.api_provider import make_profile
 from claude_native_bridge.settings import (
+    BOOTSTRAP_FRAME_TOO_LARGE_CODE,
     LOGIN_REFRESH_CONTENTION_CODE,
     LOGIN_REFRESH_CONTENTION_MESSAGE,
+    NativeBootstrapTooLarge,
 )
 
 TERMINAL = {
@@ -227,6 +229,11 @@ UNKNOWN = {
     "message": "opaque bridge failure",
     "type": "bridge_generation_error",
     "code": "generation_failed",
+}
+FRAME = {
+    "message": str(NativeBootstrapTooLarge(200_928, 150_000)),
+    "type": "invalid_request_error",
+    "code": BOOTSTRAP_FRAME_TOO_LARGE_CODE,
 }
 
 
@@ -284,6 +291,8 @@ with patch("providers.get_provider_profile", return_value=make_profile()):
         "http": classify("http", TERMINAL),
         "sse": classify("sse", TERMINAL),
         "unknown": classify("sse", UNKNOWN),
+        "frame_http": classify("http", FRAME),
+        "frame_sse": classify("sse", FRAME),
     }
 print(json.dumps(output))
 """
@@ -327,3 +336,16 @@ print(json.dumps(output))
         "rotate": False,
         "fallback": False,
     }
+    # An unpageable bootstrap over bootstrap_max_chars is deterministic: no retry.
+    for mode, exception_type, status in (
+        ("frame_http", "InternalServerError", 502),
+        ("frame_sse", "APIError", None),
+    ):
+        assert classified[mode] == {
+            "exception_type": exception_type,
+            "exception_status": status,
+            "reason": "unknown",
+            "retryable": False,
+            "rotate": False,
+            "fallback": False,
+        }
