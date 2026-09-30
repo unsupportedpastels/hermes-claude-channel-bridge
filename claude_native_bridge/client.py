@@ -23,6 +23,7 @@ from .event_log import failure_reason, record_event, safe_error_type, safe_run
 from .protocol import HistoryTracker, build_completion
 from .settings import (
     ASSUMED_CONTEXT_WINDOW,
+    NativeBootstrapTooLarge,
     NativeBridgeError,
     NativeRequestNotDelivered,
     Settings,
@@ -509,11 +510,9 @@ def _bounded_bootstrap(messages, tools, choice, native, maximum):
     for group_index, group in enumerate(groups):
         if group["mandatory"] or group_index >= current_start:
             required.extend(copy.deepcopy(group["messages"]))
-    if len(tracker.prepare(required, tools, choice)["content"]) > maximum:
-        raise NativeBridgeError(
-            "bootstrap_max_chars is too small for the mandatory instruction frame "
-            "and current user task"
-        )
+    needed = len(tracker.prepare(required, tools, choice)["content"])
+    if needed > maximum:
+        raise NativeBootstrapTooLarge(needed, maximum)
 
     runtime = getattr(native, "runtime", None)
     if runtime is None:
@@ -564,15 +563,15 @@ def _bounded_bootstrap(messages, tools, choice, native, maximum):
     selected = None
     for start in range(1, len(groups) + 1):
         current = candidate(start)
-        if len(tracker.prepare(current[0], tools, choice)["content"]) <= maximum:
+        needed = len(tracker.prepare(current[0], tools, choice)["content"])
+        if needed <= maximum:
             selected = current
             break
 
     if selected is None:
-        raise NativeBridgeError(
-            "bootstrap_max_chars is too small for the mandatory instruction "
-            "frame and omission notices"
-        )
+        # The last candidate keeps only the unpageable groups and their
+        # omission notices, so its size is the smallest frame that would fit.
+        raise NativeBootstrapTooLarge(needed, maximum)
 
     bounded, spools = selected
     for serialized, predicted in spools:

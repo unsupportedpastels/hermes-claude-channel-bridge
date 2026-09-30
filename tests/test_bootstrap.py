@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 
 from claude_native_bridge.client import NativeBridgeClient
-from claude_native_bridge.settings import NativeBridgeError, Settings
+from claude_native_bridge.settings import (
+    NativeBootstrapTooLarge,
+    NativeBridgeError,
+    Settings,
+)
 
 
 class BootstrapNative:
@@ -104,7 +108,7 @@ def test_effort_switch_rejects_one_oversized_current_message(tmp_path):
         client.create(**request([{"role": "user", "content": "first"}]))
         changed = request(huge)
         changed["reasoning_effort"] = "high"
-        with pytest.raises(NativeBridgeError, match="current user task"):
+        with pytest.raises(NativeBootstrapTooLarge, match="current turn"):
             client.create(**changed)
         assert BootstrapNative.instances[1].frames == []
         assert not (BootstrapNative.instances[1].runtime / "spool").exists()
@@ -281,7 +285,7 @@ def test_bootstrap_rejects_mandatory_instruction_frame_over_cap(tmp_path):
 
     try:
         client.create(**request([{"role": "user", "content": "first"}]))
-        with pytest.raises(NativeBridgeError, match="mandatory instruction frame"):
+        with pytest.raises(NativeBootstrapTooLarge, match="instructions"):
             client.create(**request(canonical, model="claude-opus-4-8"))
         assert BootstrapNative.instances[1].frames == []
         assert not (BootstrapNative.instances[1].runtime / "spool").exists()

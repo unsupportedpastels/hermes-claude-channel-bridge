@@ -56,6 +56,8 @@ Claude automatic memory is disabled for every native child. Native automatic com
 
 Between requests, the bridge uses Claude's correlated status-line counters to rotate at `rotation_percentage` (default 80% of the reported window), after subtracting configured `rotation_headroom_tokens`, with an optional `rotation_max_tokens` cap. Without correlated counters, `rotation_fallback_chars` bounds sent frames. A rotation occurs only between turns and re-bootstraps from Hermes canonical history. Opting into native automatic compaction remains an unverified recovery path.
 
+A bootstrap is bounded by `bootstrap_max_chars`: older history beyond it is paged out and remains readable on request. The system prompt, tool definitions and current turn cannot be paged, so a request whose unpageable part exceeds the limit is refused before anything reaches Claude. The refusal is a terminal `bootstrap_frame_too_large` error naming the measured size and the setting. Hermes does not retry it, and the next attempt is measured again, so raising the limit takes effect without a restart.
+
 ## Model catalog boundary
 
 The configured catalog is exactly:

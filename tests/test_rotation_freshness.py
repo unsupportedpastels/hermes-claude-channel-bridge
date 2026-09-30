@@ -186,6 +186,6 @@ def test_bounded_bootstrap_refuses_to_omit_the_current_user_task(tmp_path):
     # This cap can fit the metadata, mandatory instruction, and omission notices,
     # but cannot fit the current task. The bridge must reject rather than silently
     # spool the task while sending only instructions to the native model.
-    with pytest.raises(NativeBridgeError, match="current user task"):
+    with pytest.raises(NativeBridgeError, match="current turn"):
         _bounded_bootstrap(messages, None, None, native, 500)
     assert not (native.runtime / "spool").exists()
