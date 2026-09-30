@@ -58,9 +58,10 @@ class NativeBootstrapTooLarge(NativeRequestNotDelivered):
         super().__init__(
             "Raise claude_native_bridge.bootstrap_max_chars above "
             f"{required:,} (now {maximum:,}) with `hermes config set "
-            "claude_native_bridge.bootstrap_max_chars <n>`. Claude was not sent "
-            "this request: its instructions, tool definitions and current turn "
-            "cannot be paged out, so an unchanged retry fails the same way."
+            "claude_native_bridge.bootstrap_max_chars <n>`, keeping "
+            "rotation_fallback_chars above it. Claude was not sent this request: "
+            "its instructions, tool definitions and current turn cannot be paged "
+            "out, so an unchanged retry fails the same way."
         )
 
 

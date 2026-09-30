@@ -533,7 +533,11 @@ def _terminal_error(exc):
 
 
 def _error_response(error):
-    return JSONResponse({"error": error}, status_code=502)
+    # A frame refused for its size is the caller's to fix. A 5xx would be resent
+    # by an SDK's default retry policy, and each resend starts a native session
+    # only to be refused again.
+    status = 400 if error["code"] == BOOTSTRAP_FRAME_TOO_LARGE_CODE else 502
+    return JSONResponse({"error": error}, status_code=status)
 
 
 class _TerminalHTTPError(Exception):

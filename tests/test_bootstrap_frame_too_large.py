@@ -102,6 +102,8 @@ def test_first_frame_over_the_limit_reports_measured_size_and_the_fix(tmp_path):
     assert f"{error.required:,}" in message and "500" in message
     # The recovery command must survive the 200-character failure marker.
     assert COMMAND in message[:200]
+    # Settings reject a limit that is not below rotation_fallback_chars.
+    assert "rotation_fallback_chars" in message
     assert RecordingNative.instances[0].frames == []
 
     # The reported size is the real frame: that limit admits it, one less refuses.
@@ -167,16 +169,7 @@ def _error(response):
     return response.json()["error"]
 
 
-@pytest.mark.parametrize("stream", [False, True])
-def test_http_names_the_limit_and_reevaluates_an_identical_retry(tmp_path, stream):
-    engines = []
-
-    def factory(**kwargs):
-        engine = RefusingEngine()
-        engines.append(engine)
-        return engine
-
-    app = create_app(TOKEN, tmp_path, factory)
+def _request(stream):
     headers = {
         "Authorization": f"Bearer {TOKEN}",
         "X-Hermes-Bridge-Client": "owner-stream" if stream else "owner-json",
@@ -188,6 +181,20 @@ def test_http_names_the_limit_and_reevaluates_an_identical_retry(tmp_path, strea
         "hermes_session_id": "bootstrap-too-large",
         "stream": stream,
     }
+    return headers, body
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_http_names_the_limit_and_reevaluates_an_identical_retry(tmp_path, stream):
+    engines = []
+
+    def factory(**kwargs):
+        engine = RefusingEngine()
+        engines.append(engine)
+        return engine
+
+    app = create_app(TOKEN, tmp_path, factory)
+    headers, body = _request(stream)
     with TestClient(app) as client:
         first = client.post("/v1/chat/completions", headers=headers, json=body)
         repeated = client.post("/v1/chat/completions", headers=headers, json=body)
@@ -198,13 +205,42 @@ def test_http_names_the_limit_and_reevaluates_an_identical_retry(tmp_path, strea
         "code": BOOTSTRAP_FRAME_TOO_LARGE_CODE,
     }
     for response in (first, repeated):
-        assert response.status_code == (200 if stream else 502)
+        assert response.status_code == (200 if stream else 400)
         assert _error(response) == expected
         assert "Native generation failed or disconnected" not in response.text
         assert "automatic replay refused" not in response.text
     # Nothing reached the native, so the retry is measured again rather than
     # tombstoned: raising the limit takes effect on the next attempt.
     assert sum(engine.calls for engine in engines) == 2
+
+
+def test_default_sdk_retry_policy_sends_the_refused_request_once(tmp_path):
+    """An SDK resends a 5xx by default, and each resend would start a native."""
+    httpx = pytest.importorskip("httpx")
+    openai = pytest.importorskip("openai")
+    app = create_app(TOKEN, tmp_path, lambda **kwargs: RefusingEngine())
+    headers, body = _request(False)
+    with TestClient(app) as client:
+        refused = client.post("/v1/chat/completions", headers=headers, json=body)
+    sent = []
+
+    def respond(request):
+        sent.append(request)
+        return httpx.Response(
+            refused.status_code, json=refused.json(), request=request
+        )
+
+    sdk = openai.OpenAI(
+        api_key="test-key",
+        base_url="https://bridge.invalid/v1",
+        http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    with pytest.raises(openai.BadRequestError):
+        sdk.chat.completions.create(
+            model="claude-sonnet-5",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+    assert len(sent) == 1
 
 
 def test_provider_classifies_only_the_exact_envelope_as_terminal():

@@ -237,11 +237,11 @@ FRAME = {
 }
 
 
-def sdk_exception(mode, envelope):
+def sdk_exception(mode, envelope, status):
     def respond(request):
         payload = {"error": envelope}
         if mode == "http":
-            return httpx.Response(502, json=payload, request=request)
+            return httpx.Response(status, json=payload, request=request)
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},
@@ -268,8 +268,8 @@ def sdk_exception(mode, envelope):
     raise AssertionError("Mock bridge error did not raise")
 
 
-def classify(mode, envelope):
-    exc = sdk_exception(mode, envelope)
+def classify(mode, envelope, status=502):
+    exc = sdk_exception(mode, envelope, status)
     result = classifier.classify_api_error(
         exc,
         provider="claude-native-bridge",
@@ -291,7 +291,7 @@ with patch("providers.get_provider_profile", return_value=make_profile()):
         "http": classify("http", TERMINAL),
         "sse": classify("sse", TERMINAL),
         "unknown": classify("sse", UNKNOWN),
-        "frame_http": classify("http", FRAME),
+        "frame_http": classify("http", FRAME, 400),
         "frame_sse": classify("sse", FRAME),
     }
 print(json.dumps(output))
@@ -338,7 +338,7 @@ print(json.dumps(output))
     }
     # An unpageable bootstrap over bootstrap_max_chars is deterministic: no retry.
     for mode, exception_type, status in (
-        ("frame_http", "InternalServerError", 502),
+        ("frame_http", "BadRequestError", 400),
         ("frame_sse", "APIError", None),
     ):
         assert classified[mode] == {
