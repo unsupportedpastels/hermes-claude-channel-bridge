@@ -11,6 +11,7 @@ consent and any organization restrictions remain owned by the native CLI.
 
 MODEL_LABELS = {
     "claude-sonnet-5": "Claude Sonnet 5",
+    "claude-sonnet-5-5": "Claude Sonnet 5.5",
     "claude-opus-4-8": "Claude Opus 4.8",
     "claude-opus-5": "Claude Opus 5",
     "claude-opus-5-5": "Claude Opus 5.5",

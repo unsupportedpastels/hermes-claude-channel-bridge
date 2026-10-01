@@ -37,6 +37,7 @@ from .settings import (
     LOGIN_REFRESH_CONTENTION_MESSAGE,
     NativeBootstrapTooLarge,
     NativeLoginRefreshContention,
+    OWNER_BUSY_DETAIL,
     NativeRequestNotDelivered,
 )
 
@@ -797,9 +798,7 @@ class Owners:
             or (owner.cleanup_started and not owner.cleanup_completed)
         ):
             record_event("admission_rejected", reason="owner_busy")
-            raise HTTPException(
-                409, "Owner already has an active request; no inference started"
-            )
+            raise HTTPException(409, OWNER_BUSY_DETAIL)
         created = owner is None
         if created:
             if self._capacity_used() >= self.limit:

@@ -13,6 +13,9 @@ def test_profile_catalog_uses_real_http_auth_and_shared_models():
     from claude_native_bridge.models import MODEL_LABELS, MODELS
     from claude_native_bridge.provider import profile
 
+    assert "claude-sonnet-5-5" in MODELS
+    assert MODEL_LABELS["claude-sonnet-5-5"] == "Claude Sonnet 5.5"
+    assert "claude-sonnet-5" in MODELS
     assert MODELS and tuple(MODEL_LABELS) == MODELS
     assert all(label and label != model for model, label in MODEL_LABELS.items())
     assert profile.fallback_models == MODELS

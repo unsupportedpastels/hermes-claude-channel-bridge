@@ -13,6 +13,7 @@ NATIVE_LOGIN_REFRESH_CONTENTION_TEXT = (
     "(or exited mid-refresh) · Try again in a minute; if it keeps happening, close other "
     "Claude Code windows or sign in again with /login"
 )
+OWNER_BUSY_DETAIL = "Owner already has an active request; no inference started"
 LOGIN_REFRESH_CONTENTION_MESSAGE = (
     "Claude authentication needs attention. Run `claude auth login` as the bridge's "
     "OS user on the machine running the bridge, then start a fresh /review. "
@@ -126,8 +127,8 @@ class Settings:
                 or n <= 0
             ):
                 raise NativeBridgeError(name + " must be a finite positive number")
-        if type(value.max_sessions) is not int or not 1 <= value.max_sessions <= 10:
-            raise NativeBridgeError("max_sessions must be an integer from 1 to 10")
+        if type(value.max_sessions) is not int or not 1 <= value.max_sessions <= 20:
+            raise NativeBridgeError("max_sessions must be an integer from 1 to 20")
         if type(value.page_threshold) is not int or value.page_threshold <= 0:
             raise NativeBridgeError("page_threshold must be a positive integer")
         if (
