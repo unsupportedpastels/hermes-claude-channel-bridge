@@ -20,7 +20,8 @@ import yaml
 
 from .native import MODELS, NativeSession, NativeSessionLost
 from .event_log import failure_reason, record_event, safe_error_type, safe_run
-from .protocol import HistoryTracker, build_completion
+from .images import ImageError, externalize_images
+from .protocol import HistoryTracker, ImageNotSeen, build_completion
 from .settings import (
     ASSUMED_CONTEXT_WINDOW,
     NativeBootstrapTooLarge,
@@ -451,6 +452,19 @@ def _page_tool_results(messages, native, threshold):
     return paged
 
 
+def _native_messages(messages, native, threshold):
+    """Canonical messages as the native transport sees them.
+
+    Images become opaque handles backed by the session's private store and
+    oversized tool text is spooled; Hermes' canonical messages stay untouched.
+    """
+    try:
+        transport = externalize_images(messages, getattr(native, "runtime", None))
+    except ImageError as exc:
+        raise ImageNotSeen(str(exc)) from None
+    return _page_tool_results(transport, native, threshold)
+
+
 def _bounded_bootstrap(messages, tools, choice, native, maximum):
     """Bound a bootstrap without dropping instructions or splitting exchanges."""
     tracker = HistoryTracker()
@@ -856,7 +870,7 @@ class NativeBridgeClient:
                 paged_messages = None
                 source_messages = None
                 if state.native is not None:
-                    paged_source = _page_tool_results(
+                    paged_source = _native_messages(
                         messages, state.native, settings.page_threshold
                     )
                     if state.source_history is not None:
@@ -907,7 +921,7 @@ class NativeBridgeClient:
                     state.sent_chars = 0
                     state.exchanges = 0
                     native.start()
-                    paged_source = _page_tool_results(
+                    paged_source = _native_messages(
                         messages, native, settings.page_threshold
                     )
                     if state.source_history is not None:

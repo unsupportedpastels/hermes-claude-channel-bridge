@@ -131,6 +131,17 @@ delegation:
   model: claude-sonnet-5
 ```
 
+## Vision
+
+User attachments and Hermes tool-result images are delivered as actual images inside the same native interactive session. The channel frame carries only an opaque handle; Claude calls the restricted `mcp__hermesbridge__read_image` tool to receive an MCP image block. No `-p` process, external captioning model, or general native file-read tool is used.
+
+- Supported inputs: inline base64 PNG, JPEG, GIF, and WebP images in user or tool messages. The bridge does not fetch remote URLs or open caller-supplied file paths; use a local attachment or Hermes's `vision_analyze` tool to obtain inline image content.
+- Limits: 5 MiB per decoded image, 6 MiB of unique decoded images and 64 unique images per request. The existing **8 MiB whole HTTP request limit**, including base64 and conversation history, still applies and may be reached first. Images are not silently truncated or resized.
+- Image files are private to each native session, and the reader rejects path traversal, links and non-private files. On Windows this uses native ACL/reparse checks, not POSIX permissions or WSL.
+- The bridge deletes images removed from the authoritative request and clears its image store when a session closes, including when diagnostics are retained. This does not erase Hermes or Claude Code's own conversation records.
+- Re-run bridge `setup` after upgrading to add **provider-scoped** vision capability declarations for Hermes versions that do not consult the provider profile for attachment routing. Existing explicit capability choices are preserved; default models are not changed. `agent.image_input_mode: text`, a top-level `model.supports_vision: false`, or an explicitly selected `auxiliary.vision` backend can still keep attachments on the text/auxiliary path.
+- Restart the bridge API and the Hermes backend after installing the new provider code. Existing native sessions do not gain a new MCP tool without restarting.
+
 ## How it works
 
 - Every endpoint binds to loopback and requires the generated bearer key.
@@ -147,7 +158,7 @@ The server runs from its own runtime, not from Hermes's application environment,
 
 ## Limitations
 
-- Text only; multimodal content is rejected.
+- Images are supported through the session-scoped MCP reader; audio, video and other multimodal content are rejected.
 - No resume of pre-existing Claude transcripts; Hermes re-bootstraps a new native session from its own history.
 - Chat Completions subset only, `n=1`; sampling controls are not token-exact OpenAI equivalents.
 - A single long turn can grow past the rotation threshold, since rotation only happens between turns.

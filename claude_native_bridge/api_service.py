@@ -331,6 +331,29 @@ def stop_server(home, *, timeout=SHUTDOWN_TIMEOUT_SECONDS):
         return result
 
 
+def _vision_config_updates(config) -> dict:
+    """Declare only this provider's capabilities without overriding user choices.
+
+    Some Hermes releases route attachments using per-model config, not the
+    provider profile's supports_vision flag. Keep the declaration provider-scoped
+    so switching to another provider never inherits an incorrect vision override.
+    """
+    from .models import MODELS
+
+    config = config or {}
+    providers = config.get("providers", {}) or {}
+    provider = providers.get("claude-native-bridge", {}) or {}
+    existing = provider.get("models", {}) or {}
+    missing = {}
+    for model in MODELS:
+        metadata = existing.get(model, {})
+        if not isinstance(metadata, dict):
+            continue  # Do not replace unfamiliar user configuration.
+        if "supports_vision" not in metadata and "vision" not in metadata:
+            missing[model] = {"supports_vision": True}
+    return {"providers": {"claude-native-bridge": {"models": missing}}} if missing else {}
+
+
 def setup(home, *, accept_development_channels=False):
     """Configure the active profile through Hermes' existing config writers."""
     from .runtime_environment import provision
@@ -349,7 +372,8 @@ def setup(home, *, accept_development_channels=False):
     from hermes_cli.config import save_config, save_env_value, get_env_path
     from dotenv import dotenv_values
 
-    updates = {"claude_native_bridge_api": {"port": info["port"]}}
+    updates = _vision_config_updates(before)
+    updates["claude_native_bridge_api"] = {"port": info["port"]}
     if accept_development_channels:
         updates["claude_native_bridge"] = {"development_channels_accepted": True}
     save_config(updates, merge_existing=True)

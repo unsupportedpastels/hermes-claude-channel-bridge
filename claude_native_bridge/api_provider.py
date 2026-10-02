@@ -360,8 +360,11 @@ def make_profile(home=None):
         # request-client rebuilds inherit it while independent agents do not.
         default_headers={RETRY_LINEAGE_HEADER: _UNBOUND_RETRY_LINEAGE},
         fallback_models=MODELS,
-        supports_vision=False,
-        supports_vision_tool_messages=False,
+        # Images reach native Claude as private handles read through the
+        # channel's read_image MCP tool (see images.py); both gates are tied
+        # to that tested ingress path.
+        supports_vision=True,
+        supports_vision_tool_messages=True,
     )
     # The installed host exposes this as a dataclass field. Assign after
     # construction so the same plugin also remains loadable by older hosts

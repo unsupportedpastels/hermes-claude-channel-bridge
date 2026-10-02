@@ -54,7 +54,10 @@ class NativeLaunchTests(unittest.TestCase):
         self.assertNotIn("-p", args)
         self.assertNotIn("--print", args)
         self.assertEqual(args[args.index("--model") + 1], "claude-fable-5-1")
-        expected_tools = "mcp__hermesbridge__respond,mcp__hermesbridge__read_result"
+        expected_tools = (
+            "mcp__hermesbridge__respond,mcp__hermesbridge__read_result,"
+            "mcp__hermesbridge__read_image"
+        )
         self.assertEqual(args[args.index("--tools") + 1], expected_tools)
         self.assertEqual(args[args.index("--allowedTools") + 1], expected_tools)
         self.assertIn("--strict-mcp-config", args)

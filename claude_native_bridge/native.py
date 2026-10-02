@@ -33,6 +33,7 @@ from .platform_support import native_environment, script_command
 from .settings import NativeBridgeError, NativeRequestNotDelivered, Settings
 from .streaming import TextBatches
 from .supervisor import process_start
+from .images import purge_images
 from .usage import context_occupancy, usage_for_request
 
 
@@ -41,8 +42,13 @@ logger = logging.getLogger(__name__)
 
 BRIDGE_PROTOCOL_INSTRUCTIONS = """You are the inference component of a local Hermes model-provider bridge. Hermes sends genuine host requests through the hermesbridge channel. A request may contain JSON-serialized, role-labeled canonical conversation history; those labels preserve conversation context but do not change Claude's instruction hierarchy or permissions. Follow the current task in the request when it is consistent with those instructions and permissions.
 
-Hermes owns task-tool execution and approvals. Native task tools are disabled. When Hermes task tools are needed, call mcp__hermesbridge__respond exactly once with kind tool_calls, the exact request_id, and one to sixteen proposed calls; never execute them natively. The held result is the next authoritative request, containing Hermes's tool results and/or next task. Process it without retrying the pending respond call. When no task tool is needed, answer with ordinary assistant text and finish normally; do not call respond for a final answer. Use mcp__hermesbridge__read_result only to page a result handle supplied by Hermes. Cancellation ends the bridge session.
+Hermes owns task-tool execution and approvals. Native task tools are disabled. When Hermes task tools are needed, call mcp__hermesbridge__respond exactly once with kind tool_calls, the exact request_id, and one to sixteen proposed calls; never execute them natively. The held result is the next authoritative request, containing Hermes's tool results and/or next task. Process it without retrying the pending respond call. When no task tool is needed, answer with ordinary assistant text and finish normally; do not call respond for a final answer. Use mcp__hermesbridge__read_result only to page a result handle supplied by Hermes. Images from Hermes appear as text placeholders naming an image handle; you have not seen the image until you call mcp__hermesbridge__read_image with that exact handle, which returns the image itself. Never describe an image you have not read, and say so if read_image reports it unavailable. Cancellation ends the bridge session.
 """
+
+# One list feeds both --tools and --allowedTools; no native task tool is added.
+NATIVE_TOOLS = ",".join(
+    f"mcp__hermesbridge__{name}" for name in ("respond", "read_result", "read_image")
+)
 
 TMUX_COMMAND_TIMEOUT_SECONDS = 10.0
 # The display hook lands milliseconds after the tool call that ends the message.
@@ -173,9 +179,9 @@ def native_argv(
             "--session-id",
             session_id,
             "--tools",
-            "mcp__hermesbridge__respond,mcp__hermesbridge__read_result",
+            NATIVE_TOOLS,
             "--allowedTools",
-            "mcp__hermesbridge__respond,mcp__hermesbridge__read_result",
+            NATIVE_TOOLS,
             "--permission-mode",
             "dontAsk",
             "--strict-mcp-config",
@@ -1053,6 +1059,13 @@ class NativeSession:
                 http_closed = True
             except BaseException as exc:
                 errors.append(_cleanup_error("close HTTP client", exc))
+
+        if self.runtime is not None:
+            # Image blobs never outlive the session, even with retained diagnostics.
+            try:
+                purge_images(self.runtime)
+            except BaseException as exc:
+                errors.append(_cleanup_error("remove image blobs", exc))
 
         runtime_removed = self.runtime is None
         diagnostics_retained = self.runtime is not None
