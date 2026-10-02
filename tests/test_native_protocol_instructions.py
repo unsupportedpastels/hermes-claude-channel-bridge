@@ -53,7 +53,8 @@ def test_native_launch_appends_protocol_file_without_replacing_native_prompt(tmp
     assert "--system-prompt-file" not in args
     assert BRIDGE_PROTOCOL_INSTRUCTIONS not in args
     assert args[args.index("--tools") + 1] == (
-        "mcp__hermesbridge__respond,mcp__hermesbridge__read_result"
+        "mcp__hermesbridge__respond,mcp__hermesbridge__read_result,"
+        "mcp__hermesbridge__read_image"
     )
     assert args[args.index("--permission-mode") + 1] == "dontAsk"
     assert "--dangerously-skip-permissions" not in args
@@ -70,3 +71,19 @@ def test_protocol_describes_real_bridge_contract_without_elevating_history_roles
     assert "held result is the next authoritative request" in text
     assert "Native task tools are disabled" in text
     assert "bypass" not in text.lower()
+
+
+def test_image_reader_is_in_both_allowlists_instructions_and_tasks_stay_disabled():
+    args = native_argv("/bin/claude", "id", "/tmp/mcp.json", "claude-sonnet-5", "low")
+    tools = args[args.index("--tools") + 1].split(",")
+
+    assert tools == [
+        "mcp__hermesbridge__respond",
+        "mcp__hermesbridge__read_result",
+        "mcp__hermesbridge__read_image",
+    ]
+    assert args[args.index("--allowedTools") + 1].split(",") == tools
+    assert all(tool.startswith("mcp__hermesbridge__") for tool in tools)
+    assert "--disable-slash-commands" in args
+    assert "mcp__hermesbridge__read_image" in BRIDGE_PROTOCOL_INSTRUCTIONS
+    assert "Native task tools are disabled" in BRIDGE_PROTOCOL_INSTRUCTIONS

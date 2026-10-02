@@ -30,6 +30,7 @@ from .settings import (
     BOOTSTRAP_FRAME_TOO_LARGE_CODE,
     LOGIN_REFRESH_CONTENTION_CODE,
     LOGIN_REFRESH_CONTENTION_MESSAGE,
+    OWNER_BUSY_DETAIL,
 )
 
 OWNER_HEADER = "X-Hermes-Bridge-Client"
@@ -219,7 +220,24 @@ def _first_run(home, token):
 def _classify_bridge_error(
     error, *, status_code, error_code, message, body, model
 ):
-    """Fail closed only for the bridge's exact sanitized terminal auth envelope."""
+    """Classify only the bridge's exact envelopes; everything else keeps host handling.
+
+    The terminal auth envelope fails closed. The owner-busy admission refusal
+    (HTTP 409 before any inference) is retryable after a backoff: it happens
+    when Hermes aborts a stream and reopens one while the bridge is still
+    retiring the aborted request, and nothing was started to replay.
+    """
+    if (
+        status_code == 409
+        and isinstance(body, dict)
+        and body.get("detail") == OWNER_BUSY_DETAIL
+    ):
+        return {
+            "reason": "overloaded",
+            "retryable": True,
+            "should_rotate_credential": False,
+            "should_fallback": False,
+        }
     envelope = body.get("error", body) if isinstance(body, dict) else None
     if (
         isinstance(envelope, dict)
@@ -342,8 +360,11 @@ def make_profile(home=None):
         # request-client rebuilds inherit it while independent agents do not.
         default_headers={RETRY_LINEAGE_HEADER: _UNBOUND_RETRY_LINEAGE},
         fallback_models=MODELS,
-        supports_vision=False,
-        supports_vision_tool_messages=False,
+        # Images reach native Claude as private handles read through the
+        # channel's read_image MCP tool (see images.py); both gates are tied
+        # to that tested ingress path.
+        supports_vision=True,
+        supports_vision_tool_messages=True,
     )
     # The installed host exposes this as a dataclass field. Assign after
     # construction so the same plugin also remains loadable by older hosts

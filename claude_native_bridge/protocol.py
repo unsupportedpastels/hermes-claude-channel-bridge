@@ -15,6 +15,8 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+from .images import ImageError, decode_image_part, is_image_part
+
 try:
     import jsonschema as _jsonschema
 except ImportError:
@@ -26,7 +28,11 @@ class ProtocolError(ValueError):
 
 
 class UnsupportedContent(ProtocolError):
-    """Content cannot be represented faithfully by this text-only bridge."""
+    """Content cannot be represented faithfully by this bridge."""
+
+
+class ImageNotSeen(UnsupportedContent):
+    """An image part is invalid or unsupported; the message says it was not seen."""
 
 
 # These proposal-only limits are identical to channel/protocol.mjs. Depth is
@@ -163,6 +169,17 @@ def _messages(messages: list[dict]) -> list[dict]:
                 raise UnsupportedContent("Non-assistant messages require text content")
         elif isinstance(content, list):
             for part in content:
+                if is_image_part(part):
+                    if role not in ("user", "tool"):
+                        raise ImageNotSeen(
+                            "Image not seen by the model: images are only "
+                            "supported in user and tool messages."
+                        )
+                    try:
+                        decode_image_part(part)
+                    except ImageError as exc:
+                        raise ImageNotSeen(str(exc)) from None
+                    continue
                 if (
                     not isinstance(part, dict)
                     or part.get("type") != "text"
@@ -170,7 +187,7 @@ def _messages(messages: list[dict]) -> list[dict]:
                     or set(part) != {"type", "text"}
                 ):
                     raise UnsupportedContent(
-                        "Only explicit text content blocks are supported"
+                        "Only explicit text and inline image content blocks are supported"
                     )
         elif not isinstance(content, str):
             raise UnsupportedContent(

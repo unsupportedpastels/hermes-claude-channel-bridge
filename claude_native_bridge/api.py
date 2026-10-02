@@ -25,7 +25,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .event_log import event_trace, failure_reason, record_event, safe_error_type
 from .models import MODELS
-from .protocol import _choice, _messages, _tool_definitions, _validate_arguments
+from .protocol import (
+    ImageNotSeen,
+    _choice,
+    _messages,
+    _tool_definitions,
+    _validate_arguments,
+)
 from .service_lifecycle import (
     DRAIN_TIMEOUT_SECONDS,
     IDLE_CHECK_SECONDS,
@@ -37,6 +43,7 @@ from .settings import (
     LOGIN_REFRESH_CONTENTION_MESSAGE,
     NativeBootstrapTooLarge,
     NativeLoginRefreshContention,
+    OWNER_BUSY_DETAIL,
     NativeRequestNotDelivered,
 )
 
@@ -797,9 +804,7 @@ class Owners:
             or (owner.cleanup_started and not owner.cleanup_completed)
         ):
             record_event("admission_rejected", reason="owner_busy")
-            raise HTTPException(
-                409, "Owner already has an active request; no inference started"
-            )
+            raise HTTPException(409, OWNER_BUSY_DETAIL)
         created = owner is None
         if created:
             if self._capacity_used() >= self.limit:
@@ -1190,6 +1195,8 @@ def create_app(
             raise
         except TimeoutError:
             raise HTTPException(408, "Request body timeout") from None
+        except ImageNotSeen as exc:
+            raise HTTPException(400, str(exc)) from None
         except Exception:
             raise HTTPException(
                 400, "Invalid or unsupported completion request"

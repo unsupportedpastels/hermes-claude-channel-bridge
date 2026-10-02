@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
@@ -113,6 +114,12 @@ def _signal_owned_group(pid, start, sig):
 
 def _archive_run(runtime):
     """Archive by directory rename so startup will never sweep the run twice."""
+    # Archived diagnostics must not retain image blobs. This file is launched by
+    # path, so it cannot import the package's images module.
+    try:
+        shutil.rmtree(runtime / "images")
+    except OSError:
+        pass
     target = runtime.with_name(runtime.name + ".archived")
     if target.exists():
         target = runtime.with_name(runtime.name + f".archived-{time.time_ns()}")
