@@ -1,4 +1,8 @@
-"""Read native Claude's documented status-line counters; never infer missing usage."""
+"""Read native Claude's documented status-line counters; never infer missing usage.
+
+The status line omits the thinking-token breakdown, so it is taken from the native
+transcript entry whose counters match the status line exactly, or left unreported.
+"""
 
 import json
 import os
@@ -15,6 +19,57 @@ TOKEN_FIELDS = (
     "cache_read_input_tokens",
 )
 PROVENANCE_SOURCE = "native_status_line"
+TRANSCRIPT_TAIL_BYTES = 1024 * 1024
+
+
+def _transcript_path(payload, session_id):
+    path = payload.get("transcript_path")
+    if (
+        isinstance(path, str)
+        and os.path.isabs(path)
+        and Path(path).name == f"{session_id}.jsonl"
+    ):
+        return path
+    return None
+
+
+def _thinking_tokens(path, usage):
+    """Thinking tokens of the one transcript message whose counters equal ``usage``."""
+    try:
+        with open(path, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - TRANSCRIPT_TAIL_BYTES))
+            lines = stream.read().splitlines()
+    except (OSError, TypeError, ValueError):
+        return None
+    found = {}
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get("type") != "assistant":
+            continue
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        native = message.get("usage")
+        if not isinstance(native, dict) or any(
+            native.get(field) != usage[field] for field in TOKEN_FIELDS
+        ):
+            continue
+        # A match without a usable id, or one id with differing values, is ambiguous.
+        message_id = message.get("id")
+        if not isinstance(message_id, str) or not message_id:
+            return None
+        details = native.get("output_tokens_details")
+        value = details.get("thinking_tokens") if isinstance(details, dict) else None
+        if found.setdefault(message_id, value) != value:
+            return None
+    if len(found) != 1:
+        return None
+    value = next(iter(found.values()))
+    return value if type(value) is int and value >= 0 else None
 
 
 def _unknown_counters():
@@ -96,7 +151,7 @@ def usage_for_request(snapshot, session_id, model, previous_requests):
         + usage["cache_creation_input_tokens"]
         + usage["cache_read_input_tokens"]
     )
-    return NS(
+    result = NS(
         prompt_tokens=prompt,
         completion_tokens=usage["output_tokens"],
         total_tokens=prompt + usage["output_tokens"],
@@ -105,6 +160,11 @@ def usage_for_request(snapshot, session_id, model, previous_requests):
             cache_write_tokens=usage["cache_creation_input_tokens"],
         ),
     )
+    path = _transcript_path(snapshot, session_id)
+    thinking = _thinking_tokens(path, usage) if path else None
+    if thinking is not None:
+        result.completion_tokens_details = NS(reasoning_tokens=thinking)
+    return result
 
 
 def context_occupancy(snapshot, session_id, model):
@@ -157,6 +217,9 @@ def capture_status(runtime, payload):
             },
             "captured_ns": time.monotonic_ns(),
         }
+        transcript = _transcript_path(payload, launch.get("session_id"))
+        if transcript:
+            data["transcript_path"] = transcript
         fd, name = tempfile.mkstemp(prefix=".usage-", dir=root)
         try:
             with os.fdopen(fd, "w") as stream:
