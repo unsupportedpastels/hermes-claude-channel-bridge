@@ -6,9 +6,9 @@ import {CallToolRequestSchema, ListToolsRequestSchema, McpError, ErrorCode} from
 import {Bridge, BridgeError, MAX_BYTES, RESPOND_SCHEMA} from './protocol.mjs';
 import {appendDiagnostic} from './diagnostic-log.mjs';
 import {createHttpServer} from './http.mjs';
-import {readTransport} from './platform.mjs';
+import {assertPrivateFile, readTransport} from './platform.mjs';
 
-const instructions = 'Hermes owns canonical history and task execution. For each authoritative request, answer ordinary text directly and finish normally when no Hermes tool is needed. Do not call respond for an ordinary text final. To propose one to sixteen Hermes tool calls, call respond exactly once with kind tool_calls and the exact request_id. Never execute task tools natively. Any brief pre-tool prose is part of your answer. respond is a yield-and-wait rendezvous: its pending tool result is the NEXT authoritative request. Process that request, then answer directly or propose tools. Do not retry a pending respond call. Use read_result only for paged Hermes tool-result handles. Cancellation breaks this session.';
+const instructions = 'Hermes owns canonical history and task execution. For each authoritative request, answer ordinary text directly and finish normally when no Hermes tool is needed. Do not call respond for an ordinary text final. To propose one to sixteen Hermes tool calls, call respond exactly once with kind tool_calls and the exact request_id. Never execute task tools natively. Any brief pre-tool prose is part of your answer. respond is a yield-and-wait rendezvous: its pending tool result is the NEXT authoritative request. Process that request, then answer directly or propose tools. Do not retry a pending respond call. Use read_result only for paged Hermes tool-result handles. Use read_image with an image handle named in a Hermes placeholder to see that image; you have not seen it until read_image returns it. Cancellation breaks this session.';
 const READ_RESULT_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['handle', 'offset', 'length'],
   properties: {
@@ -36,6 +36,61 @@ async function readResult(dir, args) {
   } catch {
     return toolText('handle expired; re-run the tool', true);
   }
+}
+const IMAGE_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['handle'],
+  properties: {handle: {type: 'string', pattern: '^i[0-9a-f]{32}$'}},
+};
+const IMAGE_TYPES = {png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp'};
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const IMAGE_UNAVAILABLE = 'image handle expired or invalid; the image was not seen';
+const imageMatches = (mime, b) => (mime === 'image/png' && b.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')))
+  || (mime === 'image/jpeg' && b.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex')))
+  || (mime === 'image/gif' && ['GIF87a', 'GIF89a'].includes(b.subarray(0, 6).toString('latin1')))
+  || (mime === 'image/webp' && b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP');
+// Returns the stored image as one MCP image block: never text, never paged. The
+// handle is a bare name; it must resolve to a single-link regular file directly
+// inside this session's own images directory.
+async function readImage(dir, args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length !== 1
+      || typeof args.handle !== 'string' || !/^i[0-9a-f]{32}$/.test(args.handle)) {
+    return toolText(IMAGE_UNAVAILABLE, true);
+  }
+  try {
+    const root = path.join(dir, 'images');
+    const rootStat = await fs.promises.lstat(root);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return toolText(IMAGE_UNAVAILABLE, true);
+    const realRoot = await fs.promises.realpath(root);
+    for (const [extension, mimeType] of Object.entries(IMAGE_TYPES)) {
+      const file = path.join(root, `${args.handle}.${extension}`);
+      let stat;
+      try { stat = await fs.promises.lstat(file); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size < 1 || stat.size > MAX_IMAGE_BYTES) {
+        return toolText(IMAGE_UNAVAILABLE, true);
+      }
+      assertPrivateFile(file); // owner-only + no reparse/link: POSIX mode/uid, Windows ACL
+      const real = await fs.promises.realpath(file);
+      if (path.dirname(real) !== realRoot) return toolText(IMAGE_UNAVAILABLE, true);
+      const handle = await fs.promises.open(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+      try {
+        const opened = await handle.stat();
+        if (!opened.isFile() || opened.nlink !== 1 || opened.size !== stat.size
+            || (process.platform !== 'win32' && (opened.ino !== stat.ino || opened.dev !== stat.dev))) {
+          return toolText(IMAGE_UNAVAILABLE, true);
+        }
+        const bytes = Buffer.alloc(opened.size);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const {bytesRead} = await handle.read(bytes, offset, bytes.length - offset, offset);
+          if (bytesRead === 0) break;
+          offset += bytesRead;
+        }
+        if (offset !== bytes.length || !imageMatches(mimeType, bytes)) return toolText(IMAGE_UNAVAILABLE, true);
+        return {content: [{type: 'image', data: bytes.toString('base64'), mimeType}]};
+      } finally { await handle.close(); }
+    }
+  } catch {}
+  return toolText(IMAGE_UNAVAILABLE, true);
 }
 // Diagnostics stay inside the private session runtime: a native CLI persists an MCP
 // server's stderr in its own log, which is neither a private nor a temporary
@@ -99,10 +154,14 @@ try {
     {
       name: 'read_result', description: 'Read a page from an oversized Hermes tool result using the handle from its compact result envelope.', inputSchema: READ_RESULT_SCHEMA,
     },
+    {
+      name: 'read_image', description: 'View an image Hermes attached, using the handle named in its placeholder. Returns the image itself; the image is not seen until this succeeds.', inputSchema: IMAGE_SCHEMA,
+    },
   ]}));
   mcp.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     if (request.params.name === 'read_result') return readResult(dir, request.params.arguments);
-    if (request.params.name !== 'respond') throw new McpError(ErrorCode.InvalidParams, 'Only respond and read_result are supported');
+    if (request.params.name === 'read_image') return readImage(dir, request.params.arguments);
+    if (request.params.name !== 'respond') throw new McpError(ErrorCode.InvalidParams, 'Only respond, read_result and read_image are supported');
     try {
       const pending = bridge.respond(request.params.arguments, extra.signal);
       log('decision', {sequence: bridge.sequence, kind: request.params.arguments.kind});

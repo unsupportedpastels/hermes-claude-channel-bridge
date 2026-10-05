@@ -96,6 +96,7 @@ Discovered through `/v1/models`:
 | Model | ID |
 |---|---|
 | Claude Sonnet 5 | `claude-sonnet-5` |
+| Claude Sonnet 5.5 | `claude-sonnet-5-5` |
 | Claude Opus 4.8 | `claude-opus-4-8` |
 | Claude Opus 5 | `claude-opus-5` |
 | Claude Opus 5.5 | `claude-opus-5-5` |
@@ -109,7 +110,7 @@ Opus 5.5 requires Claude Code 2.1.280 or later. Opus 4.8 remains independently s
 
 All keys live under `claude_native_bridge` in Hermes `config.yaml`.
 
-- `max_sessions`: concurrent native sessions (foreground chats plus subagents).
+- `max_sessions`: concurrent native sessions (foreground chats plus subagents), from 1 to 20 (default: 2).
 - `bootstrap_max_chars` (default 100000): the largest frame a new or rebuilt native session starts from. Older history beyond it is paged out and stays readable on request. The system prompt, tool definitions and current turn cannot be paged, so a request whose unpageable part is larger is refused before anything reaches Claude, with an error that names the measured size; Hermes does not retry it. Set the limit above your largest opening request (a Kanban worker with preloaded skills is usually the biggest) and below `rotation_fallback_chars`; a limit at or above it is rejected as invalid configuration, so raise both when the request needs it. The value is read when a session starts, so a raised limit applies to the next attempt.
 - `rotation_percentage` (default 80), `rotation_headroom_tokens`, `rotation_max_tokens`: when Claude's own context counters reach the threshold between turns, the native session is retired and rebuilt from Hermes history within `bootstrap_max_chars`. Without counters, `rotation_fallback_chars` bounds the session instead.
 - `native_auto_compact` (default `false`): opt back into Claude's automatic compaction. Unverified as a recovery path.
@@ -130,6 +131,17 @@ delegation:
   model: claude-sonnet-5
 ```
 
+## Vision
+
+User attachments and Hermes tool-result images are delivered as actual images inside the same native interactive session. The channel frame carries only an opaque handle; Claude calls the restricted `mcp__hermesbridge__read_image` tool to receive an MCP image block. No `-p` process, external captioning model, or general native file-read tool is used.
+
+- Supported inputs: inline base64 PNG, JPEG, GIF, and WebP images in user or tool messages. The bridge does not fetch remote URLs or open caller-supplied file paths; use a local attachment or Hermes's `vision_analyze` tool to obtain inline image content.
+- Limits: 5 MiB per decoded image, 6 MiB of unique decoded images and 64 unique images per request. The existing **8 MiB whole HTTP request limit**, including base64 and conversation history, still applies and may be reached first. Images are not silently truncated or resized.
+- Image files are private to each native session, and the reader rejects path traversal, links and non-private files. On Windows this uses native ACL/reparse checks, not POSIX permissions or WSL.
+- The bridge deletes images removed from the authoritative request and clears its image store when a session closes, including when diagnostics are retained. This does not erase Hermes or Claude Code's own conversation records.
+- Re-run bridge `setup` after upgrading to add **provider-scoped** vision capability declarations for Hermes versions that do not consult the provider profile for attachment routing. Existing explicit capability choices are preserved; default models are not changed. `agent.image_input_mode: text`, a top-level `model.supports_vision: false`, or an explicitly selected `auxiliary.vision` backend can still keep attachments on the text/auxiliary path.
+- Restart the bridge API and the Hermes backend after installing the new provider code. Existing native sessions do not gain a new MCP tool without restarting.
+
 ## How it works
 
 - Every endpoint binds to loopback and requires the generated bearer key.
@@ -146,7 +158,7 @@ The server runs from its own runtime, not from Hermes's application environment,
 
 ## Limitations
 
-- Text only; multimodal content is rejected.
+- Images are supported through the session-scoped MCP reader; audio, video and other multimodal content are rejected.
 - No resume of pre-existing Claude transcripts; Hermes re-bootstraps a new native session from its own history.
 - Chat Completions subset only, `n=1`; sampling controls are not token-exact OpenAI equivalents.
 - A single long turn can grow past the rotation threshold, since rotation only happens between turns.

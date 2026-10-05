@@ -8,7 +8,7 @@ const text = result => result.content[0].text;
 
 test('read_result pages a run-directory spool file and is advertised', {timeout: 15_000}, async t => {
   const f = await fixture(t);
-  assert.deepEqual((await f.client.listTools()).tools.map(tool => tool.name), ['respond', 'read_result']);
+  assert.deepEqual((await f.client.listTools()).tools.map(tool => tool.name), ['respond', 'read_result', 'read_image']);
   const handle = 'r0123456789abcdef0123456789abcdef';
   const payload = 'zero😀one😀two';
   await fs.mkdir(path.join(f.dir, 'spool'), {mode: 0o700});

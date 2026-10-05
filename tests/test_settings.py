@@ -14,12 +14,15 @@ class SettingsTests(unittest.TestCase):
             {"request_timeout": float("inf")},
             {"stall_timeout": 0},
             {"max_sessions": 0},
-            {"max_sessions": 11},
+            {"max_sessions": 21},
             {"development_channels_accepted": "true"},
             {"bogus": True},
         ]:
             with self.subTest(config=config), self.assertRaises(NativeBridgeError):
                 Settings.from_mapping(config)
+
+    def test_twenty_concurrent_sessions_allowed(self):
+        self.assertEqual(Settings.from_mapping({"max_sessions": 20}).max_sessions, 20)
 
     def test_ten_concurrent_sessions_allowed(self):
         self.assertEqual(Settings.from_mapping({"max_sessions": 10}).max_sessions, 10)

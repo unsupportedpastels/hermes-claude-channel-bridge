@@ -192,7 +192,14 @@ class TextBatches:
             # Some native clients emit only the already-correlated Stop final.
             # Return it for the API's final remainder path; do not synthesize a batch.
             return final_text
-        # Native Stop strips terminal display whitespace; never alter emitted text.
-        if final_text is not None and text.rstrip() != final_text.rstrip():
-            raise ValueError("Native final text conflicts with captured batches")
+        # Stop.last_assistant_message covers only the final assistant message;
+        # native read_image/read_result calls can have complete prose before it.
+        # Keep every captured byte (including already-streamed preamble), but
+        # validate Stop against that last complete message, not an arbitrary
+        # suffix. The aggregate is also accepted for the /text-complete echo.
+        if final_text is not None:
+            last_batches = next(reversed(self.messages.values()))
+            last_text = "".join(delta for delta, _ in last_batches)
+            if final_text.rstrip() not in (text.rstrip(), last_text.rstrip()):
+                raise ValueError("Native final text conflicts with captured batches")
         return text

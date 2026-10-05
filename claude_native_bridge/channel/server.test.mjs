@@ -56,7 +56,7 @@ test('SDK handshake, channel delivery, held rendezvous and next task after final
   assert.equal(f.client.getServerVersion().name, 'hermesbridge');
   assert.deepEqual(f.client.getServerCapabilities().experimental, {'claude/channel': {}});
   const tools = (await f.client.listTools()).tools;
-  assert.deepEqual(tools.map(tool => tool.name), ['respond', 'read_result']);
+  assert.deepEqual(tools.map(tool => tool.name), ['respond', 'read_result', 'read_image']);
   assert.equal(tools[0].inputSchema.additionalProperties, false);
   assert.deepEqual(tools[0].inputSchema.properties.kind.enum, ['tool_calls']);
   const readyFile = path.join(f.dir, 'ready.json');
