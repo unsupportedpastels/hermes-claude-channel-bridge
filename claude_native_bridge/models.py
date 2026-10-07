@@ -1,8 +1,9 @@
 """Pinned native Claude model names; a catalog is not account entitlement.
 
-Sources (verified 2026-09-12, without inference):
+Sources (verified 2026-10-07, without inference):
 https://platform.claude.com/docs/en/about-claude/models/overview
 https://platform.claude.com/docs/en/models/opus-4-8/overview
+https://platform.claude.com/docs/en/models/haiku-5-5/overview
 https://code.claude.com/docs/en/model-config
 
 Claude Code accepts the full Anthropic model names. Availability, usage-credit
@@ -16,6 +17,7 @@ MODEL_LABELS = {
     "claude-opus-5": "Claude Opus 5",
     "claude-opus-5-5": "Claude Opus 5.5",
     "claude-haiku-4-5-20251001": "Claude Haiku 4.5",
+    "claude-haiku-5-5": "Claude Haiku 5.5",
     "claude-fable-5-1": "Claude Fable 5.1",
     "claude-mythos-5-1": "Claude Mythos 5.1",
 }

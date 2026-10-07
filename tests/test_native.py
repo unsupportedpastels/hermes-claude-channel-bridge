@@ -47,6 +47,13 @@ class NativeLaunchTests(unittest.TestCase):
         )
         self.assertNotIn("--effort", args)
 
+    def test_haiku_5_5_receives_effort(self):
+        args = native_argv(
+            "/bin/claude", "test-id", "/tmp/mcp.json", "claude-haiku-5-5", "medium"
+        )
+        self.assertEqual(args[args.index("--model") + 1], "claude-haiku-5-5")
+        self.assertEqual(args[args.index("--effort") + 1], "medium")
+
     def test_native_only_and_exact_model_effort(self):
         args = native_argv(
             "/bin/claude", "test-id", "/tmp/test/mcp.json", "claude-fable-5-1", "medium"
