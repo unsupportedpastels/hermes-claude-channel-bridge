@@ -271,6 +271,11 @@ def _classify_bridge_error(
 
 
 class ClaudeAPIProfile(ProviderProfile):
+    def get_model_context_length(self, model):
+        # Verified by Claude Code's native status-line context_window_size.
+        # Exact match: do not infer bounds for other versions or older models.
+        return 1_000_000 if model == "claude-mythos-5-1" else None
+
     def create_client(self, **kwargs):
         from .api_service import ensure_server
         from .runtime_environment import ensure_ready

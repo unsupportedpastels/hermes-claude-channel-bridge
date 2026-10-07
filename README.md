@@ -105,6 +105,7 @@ Discovered through `/v1/models`:
 | Claude Mythos 5.1 | `claude-mythos-5-1` |
 
 Availability, consent, authentication, and billing are native Claude responsibilities.
+The provider reports a 1,000,000-token context window for `claude-mythos-5-1`, verified from Claude Code's native status-line telemetry. Explicit user context overrides still take precedence; other models retain their existing resolution behavior.
 Opus 5.5 requires Claude Code 2.1.280 or later. Opus 4.8 remains independently selectable; choosing Opus 5.5 does not replace it.
 
 ## Configuration
