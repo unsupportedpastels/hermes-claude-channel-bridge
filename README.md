@@ -106,7 +106,7 @@ Discovered through `/v1/models`:
 | Claude Mythos 5.1 | `claude-mythos-5-1` |
 
 Availability, consent, authentication, and billing are native Claude responsibilities.
-The provider reports a 1,000,000-token context window for `claude-mythos-5-1`, verified from Claude Code's native status-line telemetry. Explicit user context overrides still take precedence; other models retain their existing resolution behavior.
+The provider reports a 1,000,000-token context window for `claude-mythos-5-1` (verified from Claude Code's native status-line telemetry) and `claude-haiku-5-5` (documented by Claude Code as always 1M on the Anthropic API). Explicit user context overrides still take precedence; other models retain their existing resolution behavior.
 Opus 5.5 requires Claude Code 2.1.280 or later, and Haiku 5.5 requires 2.1.293 or later. Opus 4.8 and Haiku 4.5 remain independently selectable; choosing a newer model does not replace them.
 
 ## Configuration
