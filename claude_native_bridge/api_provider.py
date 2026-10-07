@@ -272,9 +272,11 @@ def _classify_bridge_error(
 
 class ClaudeAPIProfile(ProviderProfile):
     def get_model_context_length(self, model):
-        # Verified by Claude Code's native status-line context_window_size.
-        # Exact match: do not infer bounds for other versions or older models.
-        return 1_000_000 if model == "claude-mythos-5-1" else None
+        # Mythos 5.1: verified by Claude Code's native status-line
+        # context_window_size. Haiku 5.5: documented as always 1M on the
+        # Anthropic API (code.claude.com/docs/en/model-config). Exact match:
+        # do not infer bounds for other versions or older models.
+        return 1_000_000 if model in ("claude-mythos-5-1", "claude-haiku-5-5") else None
 
     def create_client(self, **kwargs):
         from .api_service import ensure_server
