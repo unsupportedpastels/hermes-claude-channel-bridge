@@ -101,12 +101,13 @@ Discovered through `/v1/models`:
 | Claude Opus 5 | `claude-opus-5` |
 | Claude Opus 5.5 | `claude-opus-5-5` |
 | Claude Haiku 4.5 | `claude-haiku-4-5-20251001` |
+| Claude Haiku 5.5 | `claude-haiku-5-5` |
 | Claude Fable 5.1 | `claude-fable-5-1` |
 | Claude Mythos 5.1 | `claude-mythos-5-1` |
 
 Availability, consent, authentication, and billing are native Claude responsibilities.
 The provider reports a 1,000,000-token context window for `claude-mythos-5-1`, verified from Claude Code's native status-line telemetry. Explicit user context overrides still take precedence; other models retain their existing resolution behavior.
-Opus 5.5 requires Claude Code 2.1.280 or later. Opus 4.8 remains independently selectable; choosing Opus 5.5 does not replace it.
+Opus 5.5 requires Claude Code 2.1.280 or later, and Haiku 5.5 requires 2.1.293 or later. Opus 4.8 and Haiku 4.5 remain independently selectable; choosing a newer model does not replace them.
 
 ## Configuration
 

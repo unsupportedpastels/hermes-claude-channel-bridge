@@ -15,6 +15,9 @@ def test_profile_catalog_uses_real_http_auth_and_shared_models():
 
     assert "claude-mythos-5-1" in MODELS
     assert MODEL_LABELS["claude-mythos-5-1"] == "Claude Mythos 5.1"
+    assert "claude-haiku-5-5" in MODELS
+    assert MODEL_LABELS["claude-haiku-5-5"] == "Claude Haiku 5.5"
+    assert "claude-haiku-4-5-20251001" in MODELS
     assert "claude-sonnet-5-5" in MODELS
     assert MODEL_LABELS["claude-sonnet-5-5"] == "Claude Sonnet 5.5"
     assert "claude-sonnet-5" in MODELS
