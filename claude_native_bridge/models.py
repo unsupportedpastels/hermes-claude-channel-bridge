@@ -17,6 +17,7 @@ MODEL_LABELS = {
     "claude-opus-5-5": "Claude Opus 5.5",
     "claude-haiku-4-5-20251001": "Claude Haiku 4.5",
     "claude-fable-5-1": "Claude Fable 5.1",
+    "claude-mythos-5-1": "Claude Mythos 5.1",
 }
 MODELS = tuple(MODEL_LABELS)
 

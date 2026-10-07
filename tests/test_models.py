@@ -13,6 +13,8 @@ def test_profile_catalog_uses_real_http_auth_and_shared_models():
     from claude_native_bridge.models import MODEL_LABELS, MODELS
     from claude_native_bridge.provider import profile
 
+    assert "claude-mythos-5-1" in MODELS
+    assert MODEL_LABELS["claude-mythos-5-1"] == "Claude Mythos 5.1"
     assert "claude-sonnet-5-5" in MODELS
     assert MODEL_LABELS["claude-sonnet-5-5"] == "Claude Sonnet 5.5"
     assert "claude-sonnet-5" in MODELS
